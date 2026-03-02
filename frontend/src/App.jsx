@@ -28,70 +28,32 @@ const defaultState = {
   initiatives: [
     {
       id: "initiative-1",
-      name: "Delivery Foundation",
-      startDate: "2026-01-15",
-      endDate: "2026-06-30",
-      theme: "Quality",
-      narrative:
-        "Establish a stable operating backbone for roadmap planning, sequencing, and executive reporting.",
-    },
-    {
-      id: "initiative-2",
-      name: "Automation Scale-Up",
-      startDate: "2026-03-01",
-      endDate: "2026-09-30",
-      theme: "DevOps",
-      narrative:
-        "Expand automation and release confidence once the delivery foundation is in place.",
+      name: "",
+      startDate: "",
+      endDate: "",
+      theme: "",
+      narrative: "",
     },
   ],
   workItems: [
     {
       id: "item-1",
       initiativeId: "initiative-1",
-      name: "Dependency model",
-      owner: "PMO",
-      startDate: "2026-01-15",
-      endDate: "2026-02-28",
-      duration: "2",
-      status: "In Progress",
+      name: "",
+      owner: "",
+      startDate: "",
+      endDate: "",
+      duration: "1",
+      status: "Planned",
       dependencyIds: [],
-    },
-    {
-      id: "item-2",
-      initiativeId: "initiative-1",
-      name: "Executive roadmap shell",
-      owner: "Delivery Lead",
-      startDate: "2026-02-10",
-      endDate: "2026-04-30",
-      duration: "2",
-      status: "Planned",
-      dependencyIds: ["item-1"],
-    },
-    {
-      id: "item-3",
-      initiativeId: "initiative-2",
-      name: "Release governance dashboard",
-      owner: "Engineering Manager",
-      startDate: "2026-05-01",
-      endDate: "2026-06-30",
-      duration: "2",
-      status: "Planned",
-      dependencyIds: ["item-2"],
     },
   ],
   milestones: [
     {
       id: "milestone-1",
       initiativeId: "initiative-1",
-      date: "2026-03-20",
-      label: "Leadership-ready roadmap draft",
-    },
-    {
-      id: "milestone-2",
-      initiativeId: "initiative-2",
-      date: "2026-09-15",
-      label: "Scaled release governance rollout",
+      date: "",
+      label: "",
     },
   ],
 };
@@ -208,6 +170,22 @@ function getQuarterRange(startDate, endDate) {
   }
 
   return `${getQuarterLabel(startDate)} to ${getQuarterLabel(endDate)}`;
+}
+
+function getQuarterTags(startDate, endDate) {
+  const tags = [];
+
+  if (startDate) {
+    tags.push(getQuarterLabel(startDate));
+  }
+
+  if (endDate) {
+    tags.push(getQuarterLabel(endDate));
+  }
+
+  const uniqueTags = Array.from(new Set(tags));
+
+  return uniqueTags.length > 0 ? uniqueTags : ["Quarter pending"];
 }
 
 function clampStatus(status, atRisk) {
@@ -528,8 +506,21 @@ function getRowValue(row, keys) {
   return "";
 }
 
+function shouldIgnoreSheet(sheetName) {
+  const normalized = String(sheetName || "")
+    .trim()
+    .toLowerCase();
+
+  if (!normalized) {
+    return true;
+  }
+
+  return !normalized.startsWith("initiative");
+}
+
 function buildStateFromWorkbook(workbook, currentState) {
-  const sheets = workbook.SheetNames.map((sheetName, sheetIndex) => {
+  const sheets = workbook.SheetNames.filter((sheetName) => !shouldIgnoreSheet(sheetName)).map(
+    (sheetName, sheetIndex) => {
     const sheet = workbook.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(sheet, {
       defval: "",
@@ -586,7 +577,8 @@ function buildStateFromWorkbook(workbook, currentState) {
       rows,
       itemRows,
     };
-  });
+    },
+  );
 
   const initiatives = sheets.map((entry) => entry.initiative);
   const workItems = [];
@@ -695,6 +687,97 @@ function buildStateFromWorkbook(workbook, currentState) {
   };
 }
 
+function downloadExcelTemplate() {
+  const workbook = XLSX.utils.book_new();
+  const guideSheet = XLSX.utils.aoa_to_sheet([
+    ["Delivery Roadmap Excel Template"],
+    [""],
+    ["How to use"],
+    ["1. Each sheet represents one initiative."],
+    ["2. Rename the sheet to your initiative name."],
+    ["3. Keep the same column headers on every sheet."],
+    ["4. Add more sheets by duplicating the initiative sheet."],
+    [""],
+    ["Dependency format"],
+    ["Same initiative: Work Item Name"],
+    ["Cross initiative: Other Initiative::Work Item Name"],
+    [""],
+    ["Required columns"],
+    ["Item, Start Date, End Date, Dependencies"],
+    [""],
+    ["Optional columns"],
+    ["Owner, Status, Theme, Narrative, Milestone, Milestone Date"],
+  ]);
+  const initiativeSheet = XLSX.utils.aoa_to_sheet([
+    [
+      "Item",
+      "Start Date",
+      "End Date",
+      "Dependencies",
+      "Owner",
+      "Status",
+      "Theme",
+      "Narrative",
+      "Milestone",
+      "Milestone Date",
+    ],
+    [
+      "Establish logging & observability foundation",
+      "2026-01-15",
+      "2026-03-31",
+      "",
+      "Platform Lead",
+      "Planned",
+      "Proactive Monitoring",
+      "Create the baseline observability layer for downstream monitoring use cases.",
+      "Observability foundation ready",
+      "2026-03-31",
+    ],
+    [
+      "Role-based dashboards integrated into SDLC",
+      "2026-04-01",
+      "2026-06-30",
+      "Establish logging & observability foundation",
+      "Engineering Insights Lead",
+      "Planned",
+      "Proactive Monitoring",
+      "Extend visibility into the delivery lifecycle with role-specific dashboards.",
+      "",
+      "",
+    ],
+    [
+      "AI-assisted anomaly detection and proactive alerting",
+      "2026-07-01",
+      "2026-09-30",
+      "Release Acceleration::Migrate release automation / orchestration",
+      "SRE Lead",
+      "Planned",
+      "Proactive Monitoring",
+      "Use AI-assisted signals to catch delivery issues earlier across environments.",
+      "Anomaly detection pilot",
+      "2026-09-15",
+    ],
+  ]);
+
+  guideSheet["!cols"] = [{ wch: 18 }, { wch: 92 }];
+  initiativeSheet["!cols"] = [
+    { wch: 42 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 48 },
+    { wch: 24 },
+    { wch: 14 },
+    { wch: 24 },
+    { wch: 68 },
+    { wch: 30 },
+    { wch: 16 },
+  ];
+
+  XLSX.utils.book_append_sheet(workbook, guideSheet, "Template Guide");
+  XLSX.utils.book_append_sheet(workbook, initiativeSheet, "Initiative 1");
+  XLSX.writeFile(workbook, "delivery-roadmap-template.xlsx");
+}
+
 function downloadJsonFile(payload, filename) {
   const blob = new Blob([JSON.stringify(payload, null, 2)], {
     type: "application/json",
@@ -775,6 +858,7 @@ function App() {
     }
   });
   const [importMessage, setImportMessage] = useState("");
+  const [expandedItemId, setExpandedItemId] = useState("");
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -990,19 +1074,17 @@ function App() {
       <header className="hero-band">
         <div className="hero-copy">
           <p className="eyebrow">Delivery Roadmap Creator</p>
-          <h1>Build a sleek delivery roadmap from clear inputs.</h1>
           <p className="lede">
-            Import initiatives from Excel sheets or edit them directly, then
-            switch to a wide roadmap view built for leadership communication.
+            Add initiatives, work items, milestones, and dependencies through
+            structured fields, then switch into a wide roadmap view built for
+            leadership communication.
           </p>
         </div>
 
         <div className="hero-card">
-          <p className="hero-label">Delivery Roadmap</p>
-          <strong>{state.activePage === "input" ? "Input Page" : "Delivery Roadmap"}</strong>
+          <p className="hero-label">Excel Import Ready</p>
           <p>
-            Excel sheets map to initiatives automatically. Use
-            `Other Initiative::Work Item` for cross-initiative dependencies.
+            Use `Other Initiative::Work Item` for cross-initiative dependencies.
           </p>
         </div>
       </header>
@@ -1069,6 +1151,13 @@ function App() {
                   <p className="eyebrow">Excel Import</p>
                   <h3>Load initiatives from workbook sheets</h3>
                 </div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={downloadExcelTemplate}
+                >
+                  Download Template
+                </button>
               </div>
 
               <label>
@@ -1077,7 +1166,8 @@ function App() {
               </label>
 
               <p className="subtle-copy">
-                Each sheet becomes one initiative. Expected row headers:
+                Only sheets whose names start with `Initiative` are imported.
+                Each imported sheet becomes one initiative. Expected row headers:
                 `Item`, `Start Date`, `End Date`, `Dependencies`, optional
                 `Owner`, `Status`, `Theme`, `Narrative`, `Milestone`,
                 `Milestone Date`.
@@ -1177,8 +1267,9 @@ function App() {
                       </label>
 
                       <div className="date-note">
-                        <span>{startDate ? getQuarterLabel(startDate) : "Quarter pending"}</span>
-                        <span>{endDate ? getQuarterLabel(endDate) : "Quarter pending"}</span>
+                        {getQuarterTags(startDate, endDate).map((tag) => (
+                          <span key={`${initiative.id}-${tag}`}>{tag}</span>
+                        ))}
                       </div>
                     </article>
                   );
@@ -1409,8 +1500,8 @@ function App() {
           <aside className="panel side-panel">
             <div className="section-heading">
               <div>
-                <p className="eyebrow">Input Summary</p>
-                <h2>Imported structure</h2>
+                <p className="eyebrow">Overview</p>
+                <h2>Workbook overview</h2>
               </div>
             </div>
 
@@ -1482,8 +1573,10 @@ function App() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Delivery Roadmap</p>
-                <h2>{state.portfolioName}</h2>
-                <p className="subtle-copy">{state.audience}</p>
+                <h2>Modern Delivery Roadmap</h2>
+                <p className="subtle-copy">
+                  {state.portfolioName} | {state.audience}
+                </p>
               </div>
 
               <div className="action-row compact">
@@ -1549,55 +1642,74 @@ function App() {
                       <div className="sticky-column initiative-label">
                         <p>{initiative.name || "Untitled initiative"}</p>
                         <span>{initiative.theme || "Theme pending"}</span>
-                        <small>{initiative.quarterRange}</small>
-                        <em>{initiative.narrative || "Narrative pending"}</em>
                       </div>
 
                       <div className="lane-rows">
-                        {items.map((item) => (
-                          <div className="item-row" key={item.id}>
-                            <div className="sticky-column item-meta">
-                              <strong>{item.name || "Unnamed work item"}</strong>
-                              <span>
-                                {item.owner || "Owner pending"} | {item.status}
-                              </span>
-                              <small>
-                                {item.dependencyNames.length > 0
-                                  ? `Depends on: ${item.dependencyNames.join(", ")}`
-                                  : "No blockers"}
-                              </small>
-                            </div>
+                        {items.map((item) => {
+                          const isExpanded = expandedItemId === item.id;
 
-                            <div className="month-grid">
-                              {roadmapModel.timeline.map((month) => {
-                                const active =
-                                  month.index >= item.startIndex &&
-                                  month.index <= item.displayEndIndex;
-                                const milestone = milestones.find(
-                                  (entry) => entry.monthIndex === month.index,
-                                );
+                          return (
+                            <div className="item-shell" key={item.id}>
+                              <button
+                                type="button"
+                                className={`item-row item-row-button ${isExpanded ? "expanded" : ""}`}
+                                onClick={() =>
+                                  setExpandedItemId((current) =>
+                                    current === item.id ? "" : item.id,
+                                  )
+                                }
+                              >
+                                <div className="sticky-column item-meta compact">
+                                  <strong>{item.name || "Unnamed work item"}</strong>
+                                </div>
 
-                                return (
-                                  <div
-                                    key={`${item.id}-${month.label}`}
-                                    className={`bar-cell ${active ? "active" : ""} ${
-                                      item.atRisk ? "risk" : ""
-                                    }`}
-                                  >
-                                    {active ? <span className="bar-fill">{item.status}</span> : null}
-                                    {milestone ? (
+                                <div className="roadmap-track">
+                                  <div className="month-grid track-grid">
+                                    <div
+                                      className={`timeline-span ${item.atRisk ? "risk" : ""} ${
+                                        item.status === "Done" ? "done" : ""
+                                      } ${item.status === "In Progress" ? "progress" : ""}`}
+                                      style={{
+                                        gridColumn: `${item.startIndex + 1} / ${item.displayEndIndex + 2}`,
+                                      }}
+                                    >
+                                      <span className="span-title">
+                                        {roadmapModel.timeline[item.startIndex]?.shortLabel || "Start"} -{" "}
+                                        {roadmapModel.timeline[item.displayEndIndex]?.shortLabel || "End"}
+                                      </span>
+                                      <span className="span-status">{item.status}</span>
+                                    </div>
+                                    {milestones.map((milestone) => (
                                       <span
-                                        className="milestone-dot"
+                                        key={`${item.id}-${milestone.id}`}
+                                        className="timeline-marker"
+                                        style={{ gridColumn: `${milestone.monthIndex + 1}` }}
                                         title={milestone.label}
                                         aria-label={milestone.label}
                                       />
-                                    ) : null}
+                                    ))}
                                   </div>
-                                );
-                              })}
+                                </div>
+                              </button>
+
+                              {isExpanded ? (
+                                <div className="item-detail-panel">
+                                  <span>{item.owner || "Owner pending"}</span>
+                                  <span>{item.status}</span>
+                                  <span>
+                                    {roadmapModel.timeline[item.startIndex]?.label || "Start pending"} to{" "}
+                                    {roadmapModel.timeline[item.displayEndIndex]?.label || "End pending"}
+                                  </span>
+                                  <span>
+                                    {item.dependencyNames.length > 0
+                                      ? `Depends on: ${item.dependencyNames.join(", ")}`
+                                      : "No blockers"}
+                                  </span>
+                                </div>
+                              ) : null}
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </section>
                   );
