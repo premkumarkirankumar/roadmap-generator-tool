@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 import "./App.css";
 
-const STORAGE_KEY = "roadmap-companion-v2";
+const STORAGE_KEY = "delivery-roadmap-creator-v3";
 const STATUS_OPTIONS = ["Planned", "In Progress", "At Risk", "Done"];
 const MONTH_NAMES = [
   "Jan",
@@ -23,7 +24,7 @@ const defaultState = {
   portfolioName: "FY26 Delivery Roadmap",
   audience: "Delivery leadership and cross-functional stakeholders",
   vision:
-    "Create a lightweight roadmap companion that converts planning inputs into executive-ready delivery narratives.",
+    "Add initiatives, work items, and milestones through structured inputs, then convert them into a leadership-ready delivery roadmap.",
   initiatives: [
     {
       id: "initiative-1",
@@ -51,6 +52,7 @@ const defaultState = {
       name: "Dependency model",
       owner: "PMO",
       startDate: "2026-01-15",
+      endDate: "2026-02-28",
       duration: "2",
       status: "In Progress",
       dependencyIds: [],
@@ -61,39 +63,21 @@ const defaultState = {
       name: "Executive roadmap shell",
       owner: "Delivery Lead",
       startDate: "2026-02-10",
+      endDate: "2026-04-30",
       duration: "2",
       status: "Planned",
       dependencyIds: ["item-1"],
     },
     {
       id: "item-3",
-      initiativeId: "initiative-1",
-      name: "Leadership summary generator",
-      owner: "PMO",
-      startDate: "2026-03-01",
-      duration: "1",
-      status: "Planned",
-      dependencyIds: ["item-2"],
-    },
-    {
-      id: "item-4",
-      initiativeId: "initiative-2",
-      name: "Test coverage expansion",
-      owner: "QA Lead",
-      startDate: "2026-03-12",
-      duration: "2",
-      status: "Planned",
-      dependencyIds: ["item-1"],
-    },
-    {
-      id: "item-5",
       initiativeId: "initiative-2",
       name: "Release governance dashboard",
       owner: "Engineering Manager",
       startDate: "2026-05-01",
+      endDate: "2026-06-30",
       duration: "2",
       status: "Planned",
-      dependencyIds: ["item-3", "item-4"],
+      dependencyIds: ["item-2"],
     },
   ],
   milestones: [
@@ -112,12 +96,16 @@ const defaultState = {
   ],
 };
 
+function buildId(prefix, index) {
+  return `${prefix}-${Date.now()}-${index}`;
+}
+
 function parseDateInput(value) {
   if (!value) {
     return null;
   }
 
-  const [yearText, monthText, dayText] = value.split("-");
+  const [yearText, monthText, dayText] = String(value).split("-");
   const year = Number.parseInt(yearText, 10);
   const month = Number.parseInt(monthText, 10);
   const day = Number.parseInt(dayText, 10);
@@ -127,6 +115,64 @@ function parseDateInput(value) {
   }
 
   return new Date(Date.UTC(year, month - 1, day));
+}
+
+function formatDateInput(date) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function normalizeExcelDate(value) {
+  if (!value && value !== 0) {
+    return "";
+  }
+
+  if (value instanceof Date) {
+    return formatDateInput(
+      new Date(Date.UTC(value.getFullYear(), value.getMonth(), value.getDate())),
+    );
+  }
+
+  if (typeof value === "number") {
+    const parsed = XLSX.SSF.parse_date_code(value);
+
+    if (!parsed) {
+      return "";
+    }
+
+    return formatDateInput(
+      new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d)),
+    );
+  }
+
+  const text = String(value).trim();
+
+  if (!text) {
+    return "";
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return text;
+  }
+
+  const parsedDate = new Date(text);
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return "";
+  }
+
+  return formatDateInput(
+    new Date(
+      Date.UTC(
+        parsedDate.getFullYear(),
+        parsedDate.getMonth(),
+        parsedDate.getDate(),
+      ),
+    ),
+  );
 }
 
 function startOfMonth(date) {
@@ -172,11 +218,26 @@ function clampStatus(status, atRisk) {
   return STATUS_OPTIONS.includes(status) ? status : "Planned";
 }
 
-function normalizeItems(workItems) {
-  return workItems.map((item) => ({
-    ...item,
-    dependencyIds: Array.isArray(item.dependencyIds) ? item.dependencyIds : [],
-  }));
+function toTimelineIndex(dateString, timelineStart) {
+  const date = parseDateInput(dateString);
+
+  if (!date || !timelineStart) {
+    return 0;
+  }
+
+  return Math.max(0, monthDiff(timelineStart, startOfMonth(date)));
+}
+
+function deriveDurationMonths(item) {
+  const explicitDuration = Math.max(1, Number.parseInt(item.duration, 10) || 1);
+  const startDate = parseDateInput(item.startDate);
+  const endDate = parseDateInput(item.endDate);
+
+  if (!startDate || !endDate || endDate < startDate) {
+    return explicitDuration;
+  }
+
+  return Math.max(1, monthDiff(startOfMonth(startDate), startOfMonth(endDate)) + 1);
 }
 
 function deriveTimeline(state) {
@@ -198,11 +259,13 @@ function deriveTimeline(state) {
   state.workItems.forEach((item) => {
     const startDate = parseDateInput(item.startDate);
 
-    if (startDate) {
-      timelineDates.push(startOfMonth(startDate));
-      const duration = Math.max(1, Number.parseInt(item.duration, 10) || 1);
-      timelineDates.push(addMonths(startOfMonth(startDate), duration - 1));
+    if (!startDate) {
+      return;
     }
+
+    const startMonth = startOfMonth(startDate);
+    timelineDates.push(startMonth);
+    timelineDates.push(addMonths(startMonth, deriveDurationMonths(item) - 1));
   });
 
   state.milestones.forEach((milestone) => {
@@ -220,12 +283,10 @@ function deriveTimeline(state) {
   const latestDate = timelineDates.length
     ? new Date(Math.max(...timelineDates.map((entry) => entry.getTime())))
     : addMonths(defaultStart, 5);
-
   const safeStart = startOfMonth(earliestDate);
   let safeEnd = startOfMonth(latestDate);
-  const span = monthDiff(safeStart, safeEnd) + 1;
 
-  if (span < 6) {
+  if (monthDiff(safeStart, safeEnd) + 1 < 6) {
     safeEnd = addMonths(safeStart, 5);
   }
 
@@ -238,33 +299,26 @@ function deriveTimeline(state) {
       index,
       date,
       label: formatMonth(date),
-      quarter: getQuarterLabel(date),
       shortLabel: MONTH_NAMES[date.getUTCMonth()],
+      quarter: getQuarterLabel(date),
     };
   });
 }
 
-function toTimelineIndex(dateString, timelineStart) {
-  const date = parseDateInput(dateString);
-
-  if (!date || !timelineStart) {
-    return 0;
-  }
-
-  return Math.max(0, monthDiff(timelineStart, startOfMonth(date)));
-}
-
 function prepareInitiatives(initiatives, timeline) {
   const timelineStart = timeline[0]?.date;
-  const timelineEndIndex = Math.max(0, timeline.length - 1);
+  const maxIndex = Math.max(0, timeline.length - 1);
 
   return initiatives.map((initiative) => {
     const startDate = parseDateInput(initiative.startDate);
     const endDate = parseDateInput(initiative.endDate) || startDate;
-    const startIndex = Math.min(toTimelineIndex(initiative.startDate, timelineStart), timelineEndIndex);
+    const startIndex = Math.min(
+      toTimelineIndex(initiative.startDate, timelineStart),
+      maxIndex,
+    );
     const endIndex = Math.min(
       Math.max(startIndex, toTimelineIndex(initiative.endDate || initiative.startDate, timelineStart)),
-      timelineEndIndex,
+      maxIndex,
     );
 
     return {
@@ -280,14 +334,13 @@ function prepareInitiatives(initiatives, timeline) {
 
 function scheduleWorkItems(workItems, preparedInitiatives, timeline) {
   const timelineStart = timeline[0]?.date;
-  const timelineEndIndex = Math.max(0, timeline.length - 1);
+  const maxIndex = Math.max(0, timeline.length - 1);
   const initiativeMap = new Map(preparedInitiatives.map((initiative) => [initiative.id, initiative]));
-  const items = normalizeItems(workItems);
-  const indegree = new Map(items.map((item) => [item.id, 0]));
-  const adjacency = new Map(items.map((item) => [item.id, []]));
-  const itemMap = new Map(items.map((item) => [item.id, item]));
+  const itemMap = new Map(workItems.map((item) => [item.id, item]));
+  const indegree = new Map(workItems.map((item) => [item.id, 0]));
+  const adjacency = new Map(workItems.map((item) => [item.id, []]));
 
-  items.forEach((item) => {
+  workItems.forEach((item) => {
     item.dependencyIds.forEach((dependencyId) => {
       if (!itemMap.has(dependencyId)) {
         return;
@@ -298,7 +351,7 @@ function scheduleWorkItems(workItems, preparedInitiatives, timeline) {
     });
   });
 
-  const queue = items.filter((item) => indegree.get(item.id) === 0);
+  const queue = workItems.filter((item) => indegree.get(item.id) === 0);
   const ordered = [];
 
   while (queue.length > 0) {
@@ -324,57 +377,51 @@ function scheduleWorkItems(workItems, preparedInitiatives, timeline) {
     });
   }
 
-  const hasCycle = ordered.length !== items.length;
-  const unscheduledIds = new Set(
+  const hasCycle = ordered.length !== workItems.length;
+  const unresolvedIds = new Set(
     hasCycle
-      ? items
+      ? workItems
           .filter((item) => !ordered.some((entry) => entry.id === item.id))
           .map((item) => item.id)
       : [],
   );
   const executionOrder = hasCycle
-    ? [...ordered, ...items.filter((item) => unscheduledIds.has(item.id))]
+    ? [...ordered, ...workItems.filter((item) => unresolvedIds.has(item.id))]
     : ordered;
   const scheduledMap = new Map();
 
   const scheduledItems = executionOrder.map((item) => {
     const initiative = initiativeMap.get(item.initiativeId) || preparedInitiatives[0] || null;
-    const duration = Math.max(1, Number.parseInt(item.duration, 10) || 1);
-    const requestedStartIndex = Math.min(
-      toTimelineIndex(item.startDate, timelineStart),
-      timelineEndIndex,
-    );
+    const duration = deriveDurationMonths(item);
+    const requestedStart = Math.min(toTimelineIndex(item.startDate, timelineStart), maxIndex);
     const dependencyEnds = item.dependencyIds
       .map((dependencyId) => scheduledMap.get(dependencyId))
       .filter(Boolean)
       .map((dependency) => dependency.endIndex);
-    const earliestStartIndex = dependencyEnds.length
+    const earliestStart = dependencyEnds.length
       ? Math.max(...dependencyEnds) + 1
       : initiative?.startIndex || 0;
-    const startIndex = Math.max(
-      requestedStartIndex,
-      earliestStartIndex,
-      initiative?.startIndex || 0,
-    );
+    const startIndex = Math.max(requestedStart, earliestStart, initiative?.startIndex || 0);
     const endIndex = startIndex + duration - 1;
-    const beyondInitiative = Boolean(initiative) && endOfMonth(addMonths(timelineStart, endIndex)).getTime() >
-      (initiative.endDateObj ? endOfMonth(initiative.endDateObj).getTime() : Number.MAX_SAFE_INTEGER);
-    const beyondHorizon = endIndex > timelineEndIndex;
-    const circularDependency = unscheduledIds.has(item.id);
+    const horizonDate = endOfMonth(addMonths(timelineStart, Math.min(endIndex, maxIndex)));
+    const initiativeEnd = initiative?.endDateObj ? endOfMonth(initiative.endDateObj).getTime() : Number.MAX_SAFE_INTEGER;
+    const beyondInitiative = horizonDate.getTime() > initiativeEnd;
+    const beyondHorizon = endIndex > maxIndex;
+    const circularDependency = unresolvedIds.has(item.id);
     const atRisk = beyondInitiative || beyondHorizon || circularDependency;
     const scheduledItem = {
       ...item,
-      duration,
       initiative,
+      duration,
       startIndex,
       endIndex,
-      displayEndIndex: Math.min(endIndex, timelineEndIndex),
+      displayEndIndex: Math.min(endIndex, maxIndex),
       requestedQuarter: getQuarterLabel(parseDateInput(item.startDate) || timelineStart),
       dependencyNames: item.dependencyIds
         .map((dependencyId) => itemMap.get(dependencyId)?.name)
         .filter(Boolean),
-      circularDependency,
       atRisk,
+      circularDependency,
       status: clampStatus(item.status, atRisk),
     };
 
@@ -402,24 +449,31 @@ function prepareMilestones(milestones, preparedInitiatives, timeline) {
 }
 
 function buildDependencyMap(scheduledItems) {
-  const itemById = new Map(scheduledItems.map((item) => [item.id, item]));
+  const itemMap = new Map(scheduledItems.map((item) => [item.id, item]));
 
-  return scheduledItems.flatMap((item) =>
-    item.dependencyIds.map((dependencyId) => {
-      const dependency = itemById.get(dependencyId);
+  return scheduledItems
+    .flatMap((item) =>
+      item.dependencyIds.map((dependencyId) => {
+        const dependency = itemMap.get(dependencyId);
 
-      if (!dependency) {
-        return null;
-      }
+        if (!dependency) {
+          return null;
+        }
 
-      return {
-        id: `${dependencyId}-${item.id}`,
-        from: dependency.name,
-        to: item.name,
-        note: `${dependency.name} completes before ${item.name} can advance.`,
-      };
-    }),
-  ).filter(Boolean);
+        const crossInitiative =
+          dependency.initiative?.id !== item.initiative?.id && dependency.initiative && item.initiative;
+
+        return {
+          id: `${dependencyId}-${item.id}`,
+          from: dependency.name,
+          to: item.name,
+          note: crossInitiative
+            ? `${dependency.initiative.name} -> ${item.initiative.name}`
+            : `${dependency.name} completes before ${item.name} can advance.`,
+        };
+      }),
+    )
+    .filter(Boolean);
 }
 
 function buildExecutiveSummaries(preparedInitiatives, scheduledItems, preparedMilestones) {
@@ -430,7 +484,6 @@ function buildExecutiveSummaries(preparedInitiatives, scheduledItems, preparedMi
     const milestones = preparedMilestones.filter(
       (milestone) => milestone.initiative?.id === initiative.id,
     );
-    const themes = initiative.theme || "Core delivery";
     const risks = items.filter((item) => item.atRisk);
     const nowItem = items[0];
     const nextItem = items[1];
@@ -439,21 +492,207 @@ function buildExecutiveSummaries(preparedInitiatives, scheduledItems, preparedMi
     return {
       id: initiative.id,
       title: initiative.name,
-      theme: themes,
+      theme: initiative.theme,
       bullets: [
-        `Enable ${themes.toLowerCase()} outcomes from ${initiative.quarterRange} with a narrative anchored on ${initiative.narrative.toLowerCase()}`,
+        `Drive ${initiative.theme.toLowerCase() || "delivery"} outcomes across ${initiative.quarterRange}.`,
         nowItem
-          ? `Now: ${nowItem.name}. ${nextItem ? `Next: ${nextItem.name}.` : ""} ${laterItem ? `Later: ${laterItem.name}.` : ""}`.trim()
-          : "Now / Next / Later sequencing will appear as soon as work items are added.",
+          ? `Now: ${nowItem.name}.${nextItem ? ` Next: ${nextItem.name}.` : ""}${laterItem && laterItem !== nowItem ? ` Later: ${laterItem.name}.` : ""}`
+          : "Add work items to generate a now/next/later sequence.",
         risks.length > 0
-          ? `Leadership watchpoint: ${risks[0].name} is flagged at risk because timeline pressure or dependency ordering pushes it beyond the target window.`
-          : `Dependency posture is stable across ${items.length} scheduled work item${items.length === 1 ? "" : "s"}.`,
+          ? `Watchpoint: ${risks[0].name} is under schedule pressure because of dependencies or timeline spillover.`
+          : `Dependencies are currently sequenced cleanly for this initiative.`,
         milestones.length > 0
           ? `Milestones: ${milestones.map((milestone) => `${milestone.quarter} - ${milestone.label}`).join(" | ")}`
-          : "Milestones can be added to sharpen quarter-by-quarter communication.",
+          : "No milestones imported yet.",
       ],
     };
   });
+}
+
+function normalizeHeaderKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function getRowValue(row, keys) {
+  const entries = Object.entries(row);
+
+  for (const [key, value] of entries) {
+    if (keys.includes(normalizeHeaderKey(key))) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function buildStateFromWorkbook(workbook, currentState) {
+  const sheets = workbook.SheetNames.map((sheetName, sheetIndex) => {
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, {
+      defval: "",
+      raw: true,
+      blankrows: false,
+    });
+    const itemRows = rows.filter((row) =>
+      String(getRowValue(row, ["item", "itemname", "workitem", "workitemname"])).trim(),
+    );
+    const rowDates = itemRows
+      .flatMap((row) => [
+        normalizeExcelDate(getRowValue(row, ["startdate", "start"])),
+        normalizeExcelDate(getRowValue(row, ["enddate", "end"])),
+      ])
+      .filter(Boolean)
+      .map((value) => parseDateInput(value))
+      .filter(Boolean)
+      .sort((left, right) => left.getTime() - right.getTime());
+    const firstStart = rowDates[0] ? formatDateInput(rowDates[0]) : "";
+    const lastEnd = rowDates[rowDates.length - 1]
+      ? formatDateInput(rowDates[rowDates.length - 1])
+      : firstStart;
+    const initiativeStart =
+      normalizeExcelDate(
+        getRowValue(rows[0] || {}, [
+          "initiativestart",
+          "sheetstart",
+          "startdate",
+        ]),
+      ) || firstStart;
+    const initiativeEnd =
+      normalizeExcelDate(
+        getRowValue(rows[0] || {}, ["initiativeend", "sheetend", "enddate"]),
+      ) || lastEnd || initiativeStart;
+    const theme =
+      String(getRowValue(rows[0] || {}, ["theme", "initiativetheme"])).trim() ||
+      "Theme pending";
+    const narrative =
+      String(
+        getRowValue(rows[0] || {}, ["narrative", "initiativenarrative", "description"]),
+      ).trim() || `Imported from sheet "${sheetName}".`;
+    const initiativeId = `initiative-import-${sheetIndex + 1}`;
+
+    return {
+      sheetName,
+      initiative: {
+        id: initiativeId,
+        name: sheetName,
+        startDate: initiativeStart,
+        endDate: initiativeEnd,
+        theme,
+        narrative,
+      },
+      rows,
+      itemRows,
+    };
+  });
+
+  const initiatives = sheets.map((entry) => entry.initiative);
+  const workItems = [];
+  const milestones = [];
+  const itemLookup = new Map();
+  const pendingDependencies = [];
+
+  sheets.forEach((sheetEntry, sheetIndex) => {
+    sheetEntry.itemRows.forEach((row, rowIndex) => {
+      const itemName = String(
+        getRowValue(row, ["item", "itemname", "workitem", "workitemname"]),
+      ).trim();
+
+      if (!itemName) {
+        return;
+      }
+
+      const itemId = `item-import-${sheetIndex + 1}-${rowIndex + 1}`;
+      const startDate = normalizeExcelDate(getRowValue(row, ["startdate", "start"]));
+      const endDate = normalizeExcelDate(getRowValue(row, ["enddate", "end"]));
+      const durationValue = String(
+        getRowValue(row, ["duration", "durationmonths", "months"]),
+      ).trim();
+      const item = {
+        id: itemId,
+        initiativeId: sheetEntry.initiative.id,
+        name: itemName,
+        owner: String(getRowValue(row, ["owner", "lead"])).trim(),
+        startDate,
+        endDate,
+        duration: durationValue || String(Math.max(1, deriveDurationMonths({
+          startDate,
+          endDate,
+          duration: "1",
+        }))),
+        status:
+          String(getRowValue(row, ["status"])).trim() || "Planned",
+        dependencyIds: [],
+      };
+      const dependencyText = String(
+        getRowValue(row, ["dependencies", "dependency", "dependson"]),
+      ).trim();
+
+      workItems.push(item);
+      itemLookup.set(
+        `${sheetEntry.sheetName.toLowerCase()}::${itemName.toLowerCase()}`,
+        itemId,
+      );
+
+      if (dependencyText) {
+        pendingDependencies.push({
+          initiativeName: sheetEntry.sheetName,
+          itemId,
+          references: dependencyText
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+        });
+      }
+
+      const milestoneLabel = String(
+        getRowValue(row, ["milestone", "milestonelabel"]),
+      ).trim();
+      const milestoneDate = normalizeExcelDate(
+        getRowValue(row, ["milestonedate", "milestonewhen"]),
+      );
+
+      if (milestoneLabel && milestoneDate) {
+        milestones.push({
+          id: `milestone-import-${sheetIndex + 1}-${rowIndex + 1}`,
+          initiativeId: sheetEntry.initiative.id,
+          date: milestoneDate,
+          label: milestoneLabel,
+        });
+      }
+    });
+  });
+
+  pendingDependencies.forEach((entry) => {
+    const item = workItems.find((candidate) => candidate.id === entry.itemId);
+
+    if (!item) {
+      return;
+    }
+
+    item.dependencyIds = entry.references
+      .map((reference) => {
+        const [initiativeName, itemName] = reference.includes("::")
+          ? reference.split("::")
+          : [entry.initiativeName, reference];
+        const key = `${String(initiativeName).trim().toLowerCase()}::${String(itemName)
+          .trim()
+          .toLowerCase()}`;
+
+        return itemLookup.get(key) || null;
+      })
+      .filter(Boolean);
+  });
+
+  return {
+    ...currentState,
+    activePage: "input",
+    initiatives: initiatives.length > 0 ? initiatives : currentState.initiatives,
+    workItems: workItems.length > 0 ? workItems : currentState.workItems,
+    milestones,
+  };
 }
 
 function downloadJsonFile(payload, filename) {
@@ -466,13 +705,12 @@ function downloadJsonFile(payload, filename) {
   link.href = url;
   link.download = filename;
   link.click();
-
   URL.revokeObjectURL(url);
 }
 
 function createEmptyInitiative(index) {
   return {
-    id: `initiative-${Date.now()}-${index}`,
+    id: buildId("initiative", index),
     name: "",
     startDate: "",
     endDate: "",
@@ -483,11 +721,12 @@ function createEmptyInitiative(index) {
 
 function createEmptyWorkItem(index, initiativeId) {
   return {
-    id: `item-${Date.now()}-${index}`,
+    id: buildId("item", index),
     initiativeId: initiativeId || "",
     name: "",
     owner: "",
     startDate: "",
+    endDate: "",
     duration: "1",
     status: "Planned",
     dependencyIds: [],
@@ -496,7 +735,7 @@ function createEmptyWorkItem(index, initiativeId) {
 
 function createEmptyMilestone(index, initiativeId) {
   return {
-    id: `milestone-${Date.now()}-${index}`,
+    id: buildId("milestone", index),
     initiativeId: initiativeId || "",
     date: "",
     label: "",
@@ -535,6 +774,7 @@ function App() {
       return defaultState;
     }
   });
+  const [importMessage, setImportMessage] = useState("");
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -553,28 +793,25 @@ function App() {
       preparedInitiatives,
       timeline,
     );
-    const dependencyMap = buildDependencyMap(scheduledItems);
-    const executiveSummaries = buildExecutiveSummaries(
-      preparedInitiatives,
-      scheduledItems,
-      preparedMilestones,
-    );
-    const uniqueThemes = Array.from(
-      new Set(
-        preparedInitiatives
-          .map((initiative) => initiative.theme.trim())
-          .filter(Boolean),
-      ),
-    );
 
     return {
       timeline,
       preparedInitiatives,
       scheduledItems,
       preparedMilestones,
-      dependencyMap,
-      executiveSummaries,
-      uniqueThemes,
+      dependencyMap: buildDependencyMap(scheduledItems),
+      executiveSummaries: buildExecutiveSummaries(
+        preparedInitiatives,
+        scheduledItems,
+        preparedMilestones,
+      ),
+      uniqueThemes: Array.from(
+        new Set(
+          preparedInitiatives
+            .map((initiative) => initiative.theme.trim())
+            .filter(Boolean),
+        ),
+      ),
       hasCycle,
     };
   }, [state]);
@@ -593,9 +830,7 @@ function App() {
     setState((current) => ({
       ...current,
       initiatives: current.initiatives.map((initiative) =>
-        initiative.id === initiativeId
-          ? { ...initiative, [field]: value }
-          : initiative,
+        initiative.id === initiativeId ? { ...initiative, [field]: value } : initiative,
       ),
     }));
   }
@@ -622,9 +857,7 @@ function App() {
     setState((current) => ({
       ...current,
       milestones: current.milestones.map((milestone) =>
-        milestone.id === milestoneId
-          ? { ...milestone, [field]: value }
-          : milestone,
+        milestone.id === milestoneId ? { ...milestone, [field]: value } : milestone,
       ),
     }));
   }
@@ -644,10 +877,7 @@ function App() {
       ...current,
       workItems: [
         ...current.workItems,
-        createEmptyWorkItem(
-          current.workItems.length + 1,
-          current.initiatives[0]?.id || "",
-        ),
+        createEmptyWorkItem(current.workItems.length + 1, current.initiatives[0]?.id || ""),
       ],
     }));
   }
@@ -657,43 +887,32 @@ function App() {
       ...current,
       milestones: [
         ...current.milestones,
-        createEmptyMilestone(
-          current.milestones.length + 1,
-          current.initiatives[0]?.id || "",
-        ),
+        createEmptyMilestone(current.milestones.length + 1, current.initiatives[0]?.id || ""),
       ],
     }));
   }
 
   function removeInitiative(initiativeId) {
-    setState((current) => {
-      const remainingInitiatives = current.initiatives.filter(
-        (initiative) => initiative.id !== initiativeId,
-      );
-      const fallbackInitiativeId = remainingInitiatives[0]?.id || "";
-
-      return {
-        ...current,
-        initiatives: remainingInitiatives,
-        workItems: current.workItems
-          .filter((item) => item.initiativeId !== initiativeId)
-          .map((item) => ({
-            ...item,
-            dependencyIds: item.dependencyIds.filter((dependencyId) =>
-              current.workItems.some(
-                (workItem) =>
-                  workItem.id !== item.id &&
-                  workItem.id === dependencyId &&
-                  workItem.initiativeId !== initiativeId,
-              ),
+    setState((current) => ({
+      ...current,
+      initiatives: current.initiatives.filter((initiative) => initiative.id !== initiativeId),
+      workItems: current.workItems
+        .filter((item) => item.initiativeId !== initiativeId)
+        .map((item) => ({
+          ...item,
+          dependencyIds: item.dependencyIds.filter((dependencyId) =>
+            current.workItems.some(
+              (candidate) =>
+                candidate.id !== item.id &&
+                candidate.id === dependencyId &&
+                candidate.initiativeId !== initiativeId,
             ),
-            initiativeId: item.initiativeId === initiativeId ? fallbackInitiativeId : item.initiativeId,
-          })),
-        milestones: current.milestones.filter(
-          (milestone) => milestone.initiativeId !== initiativeId,
-        ),
-      };
-    });
+          ),
+        })),
+      milestones: current.milestones.filter(
+        (milestone) => milestone.initiativeId !== initiativeId,
+      ),
+    }));
   }
 
   function removeWorkItem(itemId) {
@@ -717,6 +936,34 @@ function App() {
 
   function resetToSample() {
     setState(defaultState);
+    setImportMessage("");
+  }
+
+  async function importFromExcel(event) {
+    const file = event.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, {
+        type: "array",
+        cellDates: true,
+      });
+
+      setState((current) => buildStateFromWorkbook(workbook, current));
+      setImportMessage(
+        `Imported ${workbook.SheetNames.length} initiative sheet${workbook.SheetNames.length === 1 ? "" : "s"} from ${file.name}.`,
+      );
+    } catch {
+      setImportMessage(
+        "Import failed. Check that the workbook is a valid .xlsx file with row headers.",
+      );
+    }
+
+    event.target.value = "";
   }
 
   function exportJson() {
@@ -734,7 +981,7 @@ function App() {
         },
         generated: roadmapModel,
       },
-      "roadmap-companion-export.json",
+      "delivery-roadmap-export.json",
     );
   }
 
@@ -745,9 +992,8 @@ function App() {
           <p className="eyebrow">Delivery Roadmap Creator</p>
           <h1>Build a sleek delivery roadmap from clear inputs.</h1>
           <p className="lede">
-            Add initiatives, work items, milestones, and dependencies through
-            structured fields, then switch into a wide roadmap view built for
-            leadership communication.
+            Import initiatives from Excel sheets or edit them directly, then
+            switch to a wide roadmap view built for leadership communication.
           </p>
         </div>
 
@@ -755,8 +1001,8 @@ function App() {
           <p className="hero-label">Delivery Roadmap</p>
           <strong>{state.activePage === "input" ? "Input Page" : "Delivery Roadmap"}</strong>
           <p>
-            Dates are entered directly and automatically translated into quarter
-            labels such as Q1 or Q2 in the roadmap view.
+            Excel sheets map to initiatives automatically. Use
+            `Other Initiative::Work Item` for cross-initiative dependencies.
           </p>
         </div>
       </header>
@@ -803,11 +1049,7 @@ function App() {
 
               <label>
                 Audience
-                <input
-                  name="audience"
-                  value={state.audience}
-                  onChange={updateRootField}
-                />
+                <input name="audience" value={state.audience} onChange={updateRootField} />
               </label>
             </div>
 
@@ -820,6 +1062,33 @@ function App() {
                 rows="3"
               />
             </label>
+
+            <section className="input-section">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Excel Import</p>
+                  <h3>Load initiatives from workbook sheets</h3>
+                </div>
+              </div>
+
+              <label>
+                Import `.xlsx`
+                <input type="file" accept=".xlsx,.xls" onChange={importFromExcel} />
+              </label>
+
+              <p className="subtle-copy">
+                Each sheet becomes one initiative. Expected row headers:
+                `Item`, `Start Date`, `End Date`, `Dependencies`, optional
+                `Owner`, `Status`, `Theme`, `Narrative`, `Milestone`,
+                `Milestone Date`.
+              </p>
+              <p className="subtle-copy">
+                Dependency format: use `Work Item Name` for same-sheet
+                dependencies, or `Other Initiative::Work Item Name` for
+                dependencies across sheets.
+              </p>
+              {importMessage ? <p className="subtle-copy">{importMessage}</p> : null}
+            </section>
 
             <section className="input-section">
               <div className="section-heading">
@@ -982,12 +1251,39 @@ function App() {
                       </label>
 
                       <label>
-                        Requested Start
+                        Status
+                        <select
+                          value={item.status}
+                          onChange={(event) =>
+                            updateWorkItem(item.id, "status", event.target.value)
+                          }
+                        >
+                          {STATUS_OPTIONS.map((status) => (
+                            <option key={status} value={status}>
+                              {status}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label>
+                        Start Date
                         <input
                           type="date"
                           value={item.startDate}
                           onChange={(event) =>
                             updateWorkItem(item.id, "startDate", event.target.value)
+                          }
+                        />
+                      </label>
+
+                      <label>
+                        End Date
+                        <input
+                          type="date"
+                          value={item.endDate}
+                          onChange={(event) =>
+                            updateWorkItem(item.id, "endDate", event.target.value)
                           }
                         />
                       </label>
@@ -1002,22 +1298,6 @@ function App() {
                             updateWorkItem(item.id, "duration", event.target.value)
                           }
                         />
-                      </label>
-
-                      <label>
-                        Status
-                        <select
-                          value={item.status}
-                          onChange={(event) =>
-                            updateWorkItem(item.id, "status", event.target.value)
-                          }
-                        >
-                          {STATUS_OPTIONS.map((status) => (
-                            <option key={status} value={status}>
-                              {status}
-                            </option>
-                          ))}
-                        </select>
                       </label>
                     </div>
 
@@ -1036,11 +1316,18 @@ function App() {
                       >
                         {state.workItems
                           .filter((candidate) => candidate.id !== item.id)
-                          .map((candidate) => (
-                            <option key={candidate.id} value={candidate.id}>
-                              {candidate.name || "Unnamed work item"}
-                            </option>
-                          ))}
+                          .map((candidate) => {
+                            const initiativeName =
+                              state.initiatives.find(
+                                (initiative) => initiative.id === candidate.initiativeId,
+                              )?.name || "Initiative";
+
+                            return (
+                              <option key={candidate.id} value={candidate.id}>
+                                {initiativeName} :: {candidate.name || "Unnamed work item"}
+                              </option>
+                            );
+                          })}
                       </select>
                     </label>
                   </article>
@@ -1103,7 +1390,7 @@ function App() {
                         />
                       </label>
 
-                      <label className="wide-field">
+                      <label>
                         Label
                         <input
                           value={milestone.label}
@@ -1123,17 +1410,13 @@ function App() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Input Summary</p>
-                <h2>What the roadmap will generate</h2>
+                <h2>Imported structure</h2>
               </div>
             </div>
 
             <div className="summary-metric-grid">
               <div className="metric-card">
-                <span>Themes</span>
-                <strong>{roadmapModel.uniqueThemes.length}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Initiatives</span>
+                <span>Sheets / Initiatives</span>
                 <strong>{state.initiatives.length}</strong>
               </div>
               <div className="metric-card">
@@ -1143,6 +1426,10 @@ function App() {
               <div className="metric-card">
                 <span>Milestones</span>
                 <strong>{state.milestones.length}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Themes</span>
+                <strong>{roadmapModel.uniqueThemes.length}</strong>
               </div>
             </div>
 
@@ -1156,7 +1443,7 @@ function App() {
                     </span>
                   ))
                 ) : (
-                  <span className="theme-pill muted-pill">Add themes in initiatives</span>
+                  <span className="theme-pill muted-pill">Add themes in Excel or manually</span>
                 )}
               </div>
             </div>
@@ -1168,8 +1455,8 @@ function App() {
                 {roadmapModel.timeline[roadmapModel.timeline.length - 1]?.label}
               </strong>
               <p>
-                Quarter roll-up is calculated from the dates you enter for
-                initiatives, work items, and milestones.
+                Initiative dates come from each sheet name plus imported row
+                dates. You can adjust them after import.
               </p>
             </div>
 
@@ -1250,9 +1537,9 @@ function App() {
                 </div>
 
                 {roadmapModel.preparedInitiatives.map((initiative) => {
-                  const items = roadmapModel.scheduledItems
-                    .filter((item) => item.initiative?.id === initiative.id)
-                    .sort((left, right) => left.startIndex - right.startIndex);
+                  const items = roadmapModel.scheduledItems.filter(
+                    (item) => item.initiative?.id === initiative.id,
+                  );
                   const milestones = roadmapModel.preparedMilestones.filter(
                     (milestone) => milestone.initiative?.id === initiative.id,
                   );
@@ -1297,9 +1584,7 @@ function App() {
                                       item.atRisk ? "risk" : ""
                                     }`}
                                   >
-                                    {active ? (
-                                      <span className="bar-fill">{item.status}</span>
-                                    ) : null}
+                                    {active ? <span className="bar-fill">{item.status}</span> : null}
                                     {milestone ? (
                                       <span
                                         className="milestone-dot"
@@ -1341,7 +1626,7 @@ function App() {
                 ))
               ) : (
                 <p className="empty-copy">
-                  Add dependencies in work items to populate the dependency map.
+                  Add dependencies in Excel or the input page to populate the dependency map.
                 </p>
               )}
             </div>
@@ -1351,7 +1636,7 @@ function App() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Executive Summary</p>
-                <h2>Leadership narrative at the bottom</h2>
+                <h2>Leadership narrative</h2>
               </div>
             </div>
 
