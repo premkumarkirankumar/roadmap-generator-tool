@@ -1,0 +1,12 @@
+{
+  "name": "roadmap-generator-tool",
+  "version": "1.0.0",
+  "description": "A lightweight roadmap generator starter project.",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "roadmap-generator-tool-backend",
+  "version": "1.0.0",
+  "description": "A lightweight Express API stub for roadmap generation.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0"
+  }
+}
