@@ -689,25 +689,6 @@ function buildStateFromWorkbook(workbook, currentState) {
 
 function downloadExcelTemplate() {
   const workbook = XLSX.utils.book_new();
-  const guideSheet = XLSX.utils.aoa_to_sheet([
-    ["Delivery Roadmap Excel Template"],
-    [""],
-    ["How to use"],
-    ["1. Each sheet represents one initiative."],
-    ["2. Rename the sheet to your initiative name."],
-    ["3. Keep the same column headers on every sheet."],
-    ["4. Add more sheets by duplicating the initiative sheet."],
-    [""],
-    ["Dependency format"],
-    ["Same initiative: Work Item Name"],
-    ["Cross initiative: Other Initiative::Work Item Name"],
-    [""],
-    ["Required columns"],
-    ["Item, Start Date, End Date, Dependencies"],
-    [""],
-    ["Optional columns"],
-    ["Owner, Status, Theme, Narrative, Milestone, Milestone Date"],
-  ]);
   const initiativeSheet = XLSX.utils.aoa_to_sheet([
     [
       "Item",
@@ -759,7 +740,6 @@ function downloadExcelTemplate() {
     ],
   ]);
 
-  guideSheet["!cols"] = [{ wch: 18 }, { wch: 92 }];
   initiativeSheet["!cols"] = [
     { wch: 42 },
     { wch: 14 },
@@ -773,7 +753,6 @@ function downloadExcelTemplate() {
     { wch: 16 },
   ];
 
-  XLSX.utils.book_append_sheet(workbook, guideSheet, "Template Guide");
   XLSX.utils.book_append_sheet(workbook, initiativeSheet, "Initiative 1");
   XLSX.writeFile(workbook, "delivery-roadmap-template.xlsx");
 }
