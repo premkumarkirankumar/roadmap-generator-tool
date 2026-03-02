@@ -21,46 +21,15 @@ const MONTH_NAMES = [
 
 const defaultState = {
   activePage: "input",
-  portfolioName: "FY26 Delivery Roadmap",
+  portfolioName: "Delivery Roadmap",
+  teamName: "",
   audience: "Delivery leadership and cross-functional stakeholders",
   vision:
     "Add initiatives, work items, and milestones through structured inputs, then convert them into a leadership-ready delivery roadmap.",
-  initiatives: [
-    {
-      id: "initiative-1",
-      name: "",
-      startDate: "",
-      endDate: "",
-      theme: "",
-      narrative: "",
-    },
-  ],
-  workItems: [
-    {
-      id: "item-1",
-      initiativeId: "initiative-1",
-      name: "",
-      owner: "",
-      startDate: "",
-      endDate: "",
-      duration: "1",
-      status: "Planned",
-      dependencyIds: [],
-    },
-  ],
-  milestones: [
-    {
-      id: "milestone-1",
-      initiativeId: "initiative-1",
-      date: "",
-      label: "",
-    },
-  ],
+  initiatives: [],
+  workItems: [],
+  milestones: [],
 };
-
-function buildId(prefix, index) {
-  return `${prefix}-${Date.now()}-${index}`;
-}
 
 function parseDateInput(value) {
   if (!value) {
@@ -137,6 +106,42 @@ function normalizeExcelDate(value) {
   );
 }
 
+function parseQuarterString(value) {
+  const match = String(value || "")
+    .trim()
+    .match(/^Q([1-4])\s+(\d{4})$/i);
+
+  if (!match) {
+    return "";
+  }
+
+  const quarter = Number.parseInt(match[1], 10);
+  const year = Number.parseInt(match[2], 10);
+  const monthIndex = quarter * 3 - 1;
+
+  return formatDateInput(new Date(Date.UTC(year, monthIndex, 1)));
+}
+
+function formatRoadmapTitleFromFilename(fileName) {
+  const baseName = String(fileName || "")
+    .replace(/\.[^.]+$/, "")
+    .replace(/[_-]+/g, " ")
+    .trim();
+
+  if (!baseName) {
+    return "Delivery Roadmap";
+  }
+
+  const words = baseName.split(/\s+/).map((word) => {
+    if (!word) {
+      return word;
+    }
+
+    return word.charAt(0).toUpperCase() + word.slice(1);
+  });
+  return words.join(" ");
+}
+
 function startOfMonth(date) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
 }
@@ -170,22 +175,6 @@ function getQuarterRange(startDate, endDate) {
   }
 
   return `${getQuarterLabel(startDate)} to ${getQuarterLabel(endDate)}`;
-}
-
-function getQuarterTags(startDate, endDate) {
-  const tags = [];
-
-  if (startDate) {
-    tags.push(getQuarterLabel(startDate));
-  }
-
-  if (endDate) {
-    tags.push(getQuarterLabel(endDate));
-  }
-
-  const uniqueTags = Array.from(new Set(tags));
-
-  return uniqueTags.length > 0 ? uniqueTags : ["Quarter pending"];
 }
 
 function clampStatus(status, atRisk) {
@@ -403,6 +392,10 @@ function scheduleWorkItems(workItems, preparedInitiatives, timeline) {
       status: clampStatus(item.status, atRisk),
     };
 
+    if (scheduledItem.dependencyNames.length === 0 && item.dependencyRefs?.length) {
+      scheduledItem.dependencyNames = item.dependencyRefs;
+    }
+
     scheduledMap.set(item.id, scheduledItem);
 
     return scheduledItem;
@@ -430,27 +423,38 @@ function buildDependencyMap(scheduledItems) {
   const itemMap = new Map(scheduledItems.map((item) => [item.id, item]));
 
   return scheduledItems
-    .flatMap((item) =>
-      item.dependencyIds.map((dependencyId) => {
-        const dependency = itemMap.get(dependencyId);
+    .flatMap((item) => {
+      if (item.dependencyIds.length > 0) {
+        return item.dependencyIds.map((dependencyId) => {
+          const dependency = itemMap.get(dependencyId);
 
-        if (!dependency) {
-          return null;
-        }
+          if (!dependency) {
+            return null;
+          }
 
-        const crossInitiative =
-          dependency.initiative?.id !== item.initiative?.id && dependency.initiative && item.initiative;
+          const crossInitiative =
+            dependency.initiative?.id !== item.initiative?.id &&
+            dependency.initiative &&
+            item.initiative;
 
-        return {
-          id: `${dependencyId}-${item.id}`,
-          from: dependency.name,
-          to: item.name,
-          note: crossInitiative
-            ? `${dependency.initiative.name} -> ${item.initiative.name}`
-            : `${dependency.name} completes before ${item.name} can advance.`,
-        };
-      }),
-    )
+          return {
+            id: `${dependencyId}-${item.id}`,
+            from: dependency.name,
+            to: item.name,
+            note: crossInitiative
+              ? `${dependency.initiative.name} -> ${item.initiative.name}`
+              : `${dependency.name} completes before ${item.name} can advance.`,
+          };
+        });
+      }
+
+      return (item.dependencyRefs || []).map((reference, index) => ({
+        id: `raw-${item.id}-${index}`,
+        from: reference,
+        to: item.name,
+        note: `${reference} is a prerequisite for ${item.name}.`,
+      }));
+    })
     .filter(Boolean);
 }
 
@@ -521,62 +525,47 @@ function shouldIgnoreSheet(sheetName) {
 function buildStateFromWorkbook(workbook, currentState) {
   const sheets = workbook.SheetNames.filter((sheetName) => !shouldIgnoreSheet(sheetName)).map(
     (sheetName, sheetIndex) => {
-    const sheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet, {
-      defval: "",
-      raw: true,
-      blankrows: false,
-    });
-    const itemRows = rows.filter((row) =>
-      String(getRowValue(row, ["item", "itemname", "workitem", "workitemname"])).trim(),
-    );
-    const rowDates = itemRows
-      .flatMap((row) => [
-        normalizeExcelDate(getRowValue(row, ["startdate", "start"])),
-        normalizeExcelDate(getRowValue(row, ["enddate", "end"])),
-      ])
-      .filter(Boolean)
-      .map((value) => parseDateInput(value))
-      .filter(Boolean)
-      .sort((left, right) => left.getTime() - right.getTime());
-    const firstStart = rowDates[0] ? formatDateInput(rowDates[0]) : "";
-    const lastEnd = rowDates[rowDates.length - 1]
-      ? formatDateInput(rowDates[rowDates.length - 1])
-      : firstStart;
-    const initiativeStart =
-      normalizeExcelDate(
-        getRowValue(rows[0] || {}, [
-          "initiativestart",
-          "sheetstart",
-          "startdate",
-        ]),
-      ) || firstStart;
-    const initiativeEnd =
-      normalizeExcelDate(
-        getRowValue(rows[0] || {}, ["initiativeend", "sheetend", "enddate"]),
-      ) || lastEnd || initiativeStart;
-    const theme =
-      String(getRowValue(rows[0] || {}, ["theme", "initiativetheme"])).trim() ||
-      "Theme pending";
-    const narrative =
-      String(
-        getRowValue(rows[0] || {}, ["narrative", "initiativenarrative", "description"]),
-      ).trim() || `Imported from sheet "${sheetName}".`;
-    const initiativeId = `initiative-import-${sheetIndex + 1}`;
+      const sheet = workbook.Sheets[sheetName];
+      const rows = XLSX.utils.sheet_to_json(sheet, {
+        defval: "",
+        raw: true,
+        blankrows: false,
+      });
+      const itemRows = rows.filter((row) =>
+        String(getRowValue(row, ["itemname", "item"])).trim(),
+      );
+      const firstRow = rows[0] || {};
+      const rowDates = itemRows
+        .flatMap((row) => [
+          normalizeExcelDate(getRowValue(row, ["startdate"])),
+          normalizeExcelDate(getRowValue(row, ["enddate"])),
+        ])
+        .filter(Boolean)
+        .map((value) => parseDateInput(value))
+        .filter(Boolean)
+        .sort((left, right) => left.getTime() - right.getTime());
+      const firstStart = rowDates[0] ? formatDateInput(rowDates[0]) : "";
+      const lastEnd = rowDates[rowDates.length - 1]
+        ? formatDateInput(rowDates[rowDates.length - 1])
+        : firstStart;
+      const initiativeName =
+        String(getRowValue(firstRow, ["initiative", "empty"])).trim() || sheetName;
+      const initiativeId = `initiative-import-${sheetIndex + 1}`;
 
-    return {
-      sheetName,
-      initiative: {
-        id: initiativeId,
-        name: sheetName,
-        startDate: initiativeStart,
-        endDate: initiativeEnd,
-        theme,
-        narrative,
-      },
-      rows,
-      itemRows,
-    };
+      return {
+        sheetName,
+        initiative: {
+          id: initiativeId,
+          name: initiativeName,
+          startDate: firstStart,
+          endDate: lastEnd || firstStart,
+          theme: "",
+          narrative:
+            String(getRowValue(firstRow, ["initiativenarrativetheme"])).trim() || "",
+        },
+        rows,
+        itemRows,
+      };
     },
   );
 
@@ -597,8 +586,8 @@ function buildStateFromWorkbook(workbook, currentState) {
       }
 
       const itemId = `item-import-${sheetIndex + 1}-${rowIndex + 1}`;
-      const startDate = normalizeExcelDate(getRowValue(row, ["startdate", "start"]));
-      const endDate = normalizeExcelDate(getRowValue(row, ["enddate", "end"]));
+      const startDate = normalizeExcelDate(getRowValue(row, ["startdate"]));
+      const endDate = normalizeExcelDate(getRowValue(row, ["enddate"]));
       const durationValue = String(
         getRowValue(row, ["duration", "durationmonths", "months"]),
       ).trim();
@@ -606,6 +595,7 @@ function buildStateFromWorkbook(workbook, currentState) {
         id: itemId,
         initiativeId: sheetEntry.initiative.id,
         name: itemName,
+        description: String(getRowValue(row, ["description"])).trim(),
         owner: String(getRowValue(row, ["owner", "lead"])).trim(),
         startDate,
         endDate,
@@ -617,6 +607,7 @@ function buildStateFromWorkbook(workbook, currentState) {
         status:
           String(getRowValue(row, ["status"])).trim() || "Planned",
         dependencyIds: [],
+        dependencyRefs: [],
       };
       const dependencyText = String(
         getRowValue(row, ["dependencies", "dependency", "dependson"]),
@@ -627,10 +618,14 @@ function buildStateFromWorkbook(workbook, currentState) {
         `${sheetEntry.sheetName.toLowerCase()}::${itemName.toLowerCase()}`,
         itemId,
       );
+      itemLookup.set(
+        `${sheetEntry.initiative.name.toLowerCase()}::${itemName.toLowerCase()}`,
+        itemId,
+      );
 
-      if (dependencyText) {
+      if (dependencyText && dependencyText.toLowerCase() !== "none") {
         pendingDependencies.push({
-          initiativeName: sheetEntry.sheetName,
+          initiativeName: sheetEntry.initiative.name,
           itemId,
           references: dependencyText
             .split(",")
@@ -642,14 +637,15 @@ function buildStateFromWorkbook(workbook, currentState) {
       const milestoneLabel = String(
         getRowValue(row, ["milestone", "milestonelabel"]),
       ).trim();
-      const milestoneDate = normalizeExcelDate(
-        getRowValue(row, ["milestonedate", "milestonewhen"]),
-      );
+      const milestoneDate =
+        normalizeExcelDate(getRowValue(row, ["milestonedate", "milestonewhen"])) ||
+        parseQuarterString(getRowValue(row, ["milestonequarter"]));
 
       if (milestoneLabel && milestoneDate) {
         milestones.push({
           id: `milestone-import-${sheetIndex + 1}-${rowIndex + 1}`,
           initiativeId: sheetEntry.initiative.id,
+          itemId,
           date: milestoneDate,
           label: milestoneLabel,
         });
@@ -676,6 +672,7 @@ function buildStateFromWorkbook(workbook, currentState) {
         return itemLookup.get(key) || null;
       })
       .filter(Boolean);
+    item.dependencyRefs = entry.references;
   });
 
   return {
@@ -691,66 +688,71 @@ function downloadExcelTemplate() {
   const workbook = XLSX.utils.book_new();
   const initiativeSheet = XLSX.utils.aoa_to_sheet([
     [
-      "Item",
+      "Initiative",
+      "Initiative Narrative Theme",
+      "Item Name",
+      "Description",
       "Start Date",
       "End Date",
-      "Dependencies",
       "Owner",
       "Status",
-      "Theme",
-      "Narrative",
       "Milestone",
-      "Milestone Date",
+      "Milestone Quarter",
+      "Dependencies",
     ],
     [
+      "Initiative 1",
+      "Shift from manual QA to scalable, intelligence-driven quality execution",
       "Establish logging & observability foundation",
+      "Create the baseline observability layer for downstream monitoring use cases.",
       "2026-01-15",
       "2026-03-31",
-      "",
       "Platform Lead",
       "Planned",
-      "Proactive Monitoring",
-      "Create the baseline observability layer for downstream monitoring use cases.",
       "Observability foundation ready",
-      "2026-03-31",
+      "Q1 2026",
+      "None",
     ],
     [
+      "Initiative 1",
+      "Shift from manual QA to scalable, intelligence-driven quality execution",
       "Role-based dashboards integrated into SDLC",
+      "Extend visibility into the delivery lifecycle with role-specific dashboards.",
       "2026-04-01",
       "2026-06-30",
-      "Establish logging & observability foundation",
       "Engineering Insights Lead",
       "Planned",
-      "Proactive Monitoring",
-      "Extend visibility into the delivery lifecycle with role-specific dashboards.",
       "",
       "",
+      "Establish logging & observability foundation",
     ],
     [
+      "Initiative 1",
+      "Shift from manual QA to scalable, intelligence-driven quality execution",
       "AI-assisted anomaly detection and proactive alerting",
+      "Use AI-assisted signals to catch delivery issues earlier across environments.",
       "2026-07-01",
       "2026-09-30",
-      "Release Acceleration::Migrate release automation / orchestration",
       "SRE Lead",
       "Planned",
-      "Proactive Monitoring",
-      "Use AI-assisted signals to catch delivery issues earlier across environments.",
       "Anomaly detection pilot",
-      "2026-09-15",
+      "Q3 2026",
+      "Initiative 2::Migrate release automation / orchestration",
     ],
   ]);
 
   initiativeSheet["!cols"] = [
+    { wch: 22 },
+    { wch: 64 },
     { wch: 42 },
-    { wch: 14 },
-    { wch: 14 },
-    { wch: 48 },
-    { wch: 24 },
-    { wch: 14 },
-    { wch: 24 },
     { wch: 68 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 24 },
+    { wch: 14 },
     { wch: 30 },
-    { wch: 16 },
+    { wch: 18 },
+    { wch: 48 },
   ];
 
   XLSX.utils.book_append_sheet(workbook, initiativeSheet, "Initiative 1");
@@ -768,40 +770,6 @@ function downloadJsonFile(payload, filename) {
   link.download = filename;
   link.click();
   URL.revokeObjectURL(url);
-}
-
-function createEmptyInitiative(index) {
-  return {
-    id: buildId("initiative", index),
-    name: "",
-    startDate: "",
-    endDate: "",
-    theme: "",
-    narrative: "",
-  };
-}
-
-function createEmptyWorkItem(index, initiativeId) {
-  return {
-    id: buildId("item", index),
-    initiativeId: initiativeId || "",
-    name: "",
-    owner: "",
-    startDate: "",
-    endDate: "",
-    duration: "1",
-    status: "Planned",
-    dependencyIds: [],
-  };
-}
-
-function createEmptyMilestone(index, initiativeId) {
-  return {
-    id: buildId("milestone", index),
-    initiativeId: initiativeId || "",
-    date: "",
-    label: "",
-  };
 }
 
 function App() {
@@ -838,6 +806,13 @@ function App() {
   });
   const [importMessage, setImportMessage] = useState("");
   const [expandedItemId, setExpandedItemId] = useState("");
+  const [selectedFileName, setSelectedFileName] = useState("");
+  const [pendingWorkbook, setPendingWorkbook] = useState(null);
+  const [visibleStartIndex, setVisibleStartIndex] = useState(0);
+  const [visibleEndIndex, setVisibleEndIndex] = useState(0);
+  const [collapsedInitiatives, setCollapsedInitiatives] = useState({});
+  const [showDependencies, setShowDependencies] = useState(false);
+  const [dependencyPanelOpen, setDependencyPanelOpen] = useState(false);
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -856,16 +831,38 @@ function App() {
       preparedInitiatives,
       timeline,
     );
+    const numberedItems = scheduledItems.map((item) => item);
+    const sortedForNumbering = [...numberedItems].sort((left, right) => {
+      if (left.initiativeId !== right.initiativeId) {
+        return left.initiativeId.localeCompare(right.initiativeId);
+      }
+
+      if (left.startIndex !== right.startIndex) {
+        return left.startIndex - right.startIndex;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+    const numberMap = new Map(
+      sortedForNumbering.map((item, index) => [item.id, index + 1]),
+    );
+    const numberedScheduledItems = scheduledItems.map((item) => ({
+      ...item,
+      itemNumber: numberMap.get(item.id) || 0,
+      dependencyItemNumbers: item.dependencyIds
+        .map((dependencyId) => numberMap.get(dependencyId))
+        .filter(Boolean),
+    }));
 
     return {
       timeline,
       preparedInitiatives,
-      scheduledItems,
+      scheduledItems: numberedScheduledItems,
       preparedMilestones,
-      dependencyMap: buildDependencyMap(scheduledItems),
+      dependencyMap: buildDependencyMap(numberedScheduledItems),
       executiveSummaries: buildExecutiveSummaries(
         preparedInitiatives,
-        scheduledItems,
+        numberedScheduledItems,
         preparedMilestones,
       ),
       uniqueThemes: Array.from(
@@ -878,131 +875,23 @@ function App() {
       hasCycle,
     };
   }, [state]);
+  useEffect(() => {
+    const maxIndex = Math.max(0, roadmapModel.timeline.length - 1);
 
+    setVisibleStartIndex((current) => Math.min(current, maxIndex));
+    setVisibleEndIndex(maxIndex);
+  }, [roadmapModel.timeline.length]);
+
+  const visibleTimeline = roadmapModel.timeline.slice(
+    visibleStartIndex,
+    visibleEndIndex + 1,
+  );
   const timelineStyle = {
-    "--month-count": roadmapModel.timeline.length,
-    "--timeline-width": `${Math.max(roadmapModel.timeline.length * 132, 960)}px`,
+    "--month-count": Math.max(visibleTimeline.length, 1),
+    "--timeline-width": "100%",
   };
 
-  function updateRootField(event) {
-    const { name, value } = event.target;
-    setState((current) => ({ ...current, [name]: value }));
-  }
-
-  function updateInitiative(initiativeId, field, value) {
-    setState((current) => ({
-      ...current,
-      initiatives: current.initiatives.map((initiative) =>
-        initiative.id === initiativeId ? { ...initiative, [field]: value } : initiative,
-      ),
-    }));
-  }
-
-  function updateWorkItem(itemId, field, value) {
-    setState((current) => ({
-      ...current,
-      workItems: current.workItems.map((item) =>
-        item.id === itemId ? { ...item, [field]: value } : item,
-      ),
-    }));
-  }
-
-  function updateWorkItemDependencies(itemId, values) {
-    setState((current) => ({
-      ...current,
-      workItems: current.workItems.map((item) =>
-        item.id === itemId ? { ...item, dependencyIds: values } : item,
-      ),
-    }));
-  }
-
-  function updateMilestone(milestoneId, field, value) {
-    setState((current) => ({
-      ...current,
-      milestones: current.milestones.map((milestone) =>
-        milestone.id === milestoneId ? { ...milestone, [field]: value } : milestone,
-      ),
-    }));
-  }
-
-  function addInitiative() {
-    setState((current) => ({
-      ...current,
-      initiatives: [
-        ...current.initiatives,
-        createEmptyInitiative(current.initiatives.length + 1),
-      ],
-    }));
-  }
-
-  function addWorkItem() {
-    setState((current) => ({
-      ...current,
-      workItems: [
-        ...current.workItems,
-        createEmptyWorkItem(current.workItems.length + 1, current.initiatives[0]?.id || ""),
-      ],
-    }));
-  }
-
-  function addMilestone() {
-    setState((current) => ({
-      ...current,
-      milestones: [
-        ...current.milestones,
-        createEmptyMilestone(current.milestones.length + 1, current.initiatives[0]?.id || ""),
-      ],
-    }));
-  }
-
-  function removeInitiative(initiativeId) {
-    setState((current) => ({
-      ...current,
-      initiatives: current.initiatives.filter((initiative) => initiative.id !== initiativeId),
-      workItems: current.workItems
-        .filter((item) => item.initiativeId !== initiativeId)
-        .map((item) => ({
-          ...item,
-          dependencyIds: item.dependencyIds.filter((dependencyId) =>
-            current.workItems.some(
-              (candidate) =>
-                candidate.id !== item.id &&
-                candidate.id === dependencyId &&
-                candidate.initiativeId !== initiativeId,
-            ),
-          ),
-        })),
-      milestones: current.milestones.filter(
-        (milestone) => milestone.initiativeId !== initiativeId,
-      ),
-    }));
-  }
-
-  function removeWorkItem(itemId) {
-    setState((current) => ({
-      ...current,
-      workItems: current.workItems
-        .filter((item) => item.id !== itemId)
-        .map((item) => ({
-          ...item,
-          dependencyIds: item.dependencyIds.filter((dependencyId) => dependencyId !== itemId),
-        })),
-    }));
-  }
-
-  function removeMilestone(milestoneId) {
-    setState((current) => ({
-      ...current,
-      milestones: current.milestones.filter((milestone) => milestone.id !== milestoneId),
-    }));
-  }
-
-  function resetToSample() {
-    setState(defaultState);
-    setImportMessage("");
-  }
-
-  async function importFromExcel(event) {
+  async function handleFileSelection(event) {
     const file = event.target.files?.[0];
 
     if (!file) {
@@ -1016,17 +905,51 @@ function App() {
         cellDates: true,
       });
 
-      setState((current) => buildStateFromWorkbook(workbook, current));
-      setImportMessage(
-        `Imported ${workbook.SheetNames.length} initiative sheet${workbook.SheetNames.length === 1 ? "" : "s"} from ${file.name}.`,
-      );
+      setPendingWorkbook(workbook);
+      setSelectedFileName(file.name);
+      setImportMessage("File ready. Click Generate Roadmap to build the view.");
     } catch {
+      setPendingWorkbook(null);
+      setSelectedFileName("");
       setImportMessage(
         "Import failed. Check that the workbook is a valid .xlsx file with row headers.",
       );
     }
+  }
 
-    event.target.value = "";
+  function generateRoadmap() {
+    if (!pendingWorkbook) {
+      setImportMessage("Select an Excel file before generating the roadmap.");
+      return;
+    }
+
+    setState((current) => ({
+      ...buildStateFromWorkbook(pendingWorkbook, current),
+      portfolioName: formatRoadmapTitleFromFilename(selectedFileName),
+      activePage: "roadmap",
+    }));
+    setImportMessage(`Roadmap generated from ${selectedFileName}.`);
+  }
+
+  function handleVisibleStartChange(event) {
+    const nextStart = Number.parseInt(event.target.value, 10) || 0;
+
+    setVisibleStartIndex(nextStart);
+    setVisibleEndIndex((current) => Math.max(current, nextStart));
+  }
+
+  function handleVisibleEndChange(event) {
+    const nextEnd = Number.parseInt(event.target.value, 10) || 0;
+
+    setVisibleEndIndex(nextEnd);
+    setVisibleStartIndex((current) => Math.min(current, nextEnd));
+  }
+
+  function toggleInitiative(initiativeId) {
+    setCollapsedInitiatives((current) => ({
+      ...current,
+      [initiativeId]: !(current[initiativeId] ?? true),
+    }));
   }
 
   function exportJson() {
@@ -1059,13 +982,6 @@ function App() {
             leadership communication.
           </p>
         </div>
-
-        <div className="hero-card">
-          <p className="hero-label">Excel Import Ready</p>
-          <p>
-            Use `Other Initiative::Work Item` for cross-initiative dependencies.
-          </p>
-        </div>
       </header>
 
       <div className="page-switcher">
@@ -1086,465 +1002,62 @@ function App() {
       </div>
 
       {state.activePage === "input" ? (
-        <main className="input-layout">
-          <section className="panel input-panel">
+        <main className="input-layout upload-only-layout">
+          <section className="panel input-panel upload-panel">
             <div className="section-heading">
               <div>
-                <p className="eyebrow">Portfolio Setup</p>
-                <h2>Roadmap details</h2>
+                <p className="eyebrow">Excel Input</p>
+                <h2>Upload your roadmap workbook</h2>
               </div>
-              <button type="button" className="secondary-button" onClick={resetToSample}>
-                Reset sample
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={downloadExcelTemplate}
+              >
+                Download Template
               </button>
             </div>
 
-            <div className="meta-grid">
-              <label>
-                Portfolio Name
-                <input
-                  name="portfolioName"
-                  value={state.portfolioName}
-                  onChange={updateRootField}
-                />
-              </label>
-
-              <label>
-                Audience
-                <input name="audience" value={state.audience} onChange={updateRootField} />
-              </label>
-            </div>
+            <p className="subtle-copy">
+              Use one sheet per initiative. Only sheets whose names start with
+              `Initiative` are imported. Expected columns: `Initiative`,
+              `Initiative Narrative Theme`, `Item Name`, `Description`,
+              `Start Date`, `End Date`, `Owner`, `Status`, `Milestone`,
+              `Milestone Quarter`, `Dependencies`.
+            </p>
 
             <label>
-              Vision Statement
-              <textarea
-                name="vision"
-                value={state.vision}
-                onChange={updateRootField}
-                rows="3"
+              Team
+              <input
+                type="text"
+                value={state.teamName}
+                onChange={(event) =>
+                  setState((current) => ({ ...current, teamName: event.target.value }))
+                }
+                placeholder="Systems Team"
               />
             </label>
 
-            <section className="input-section">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Excel Import</p>
-                  <h3>Load initiatives from workbook sheets</h3>
-                </div>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={downloadExcelTemplate}
-                >
-                  Download Template
-                </button>
-              </div>
+            <label className="upload-dropzone">
+              <span className="upload-label">Select Excel File</span>
+              <input type="file" accept=".xlsx,.xls" onChange={handleFileSelection} />
+            </label>
 
-              <label>
-                Import `.xlsx`
-                <input type="file" accept=".xlsx,.xls" onChange={importFromExcel} />
-              </label>
-
-              <p className="subtle-copy">
-                Only sheets whose names start with `Initiative` are imported.
-                Each imported sheet becomes one initiative. Expected row headers:
-                `Item`, `Start Date`, `End Date`, `Dependencies`, optional
-                `Owner`, `Status`, `Theme`, `Narrative`, `Milestone`,
-                `Milestone Date`.
-              </p>
-              <p className="subtle-copy">
-                Dependency format: use `Work Item Name` for same-sheet
-                dependencies, or `Other Initiative::Work Item Name` for
-                dependencies across sheets.
-              </p>
-              {importMessage ? <p className="subtle-copy">{importMessage}</p> : null}
-            </section>
-
-            <section className="input-section">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Initiatives</p>
-                  <h3>Names, dates, theme, narrative</h3>
-                </div>
-                <button type="button" className="primary-button" onClick={addInitiative}>
-                  Add Initiative
-                </button>
-              </div>
-
-              <div className="card-stack">
-                {state.initiatives.map((initiative, index) => {
-                  const startDate = parseDateInput(initiative.startDate);
-                  const endDate = parseDateInput(initiative.endDate);
-
-                  return (
-                    <article className="entry-card" key={initiative.id}>
-                      <div className="card-topline">
-                        <strong>Initiative {index + 1}</strong>
-                        {state.initiatives.length > 1 ? (
-                          <button
-                            type="button"
-                            className="ghost-button"
-                            onClick={() => removeInitiative(initiative.id)}
-                          >
-                            Remove
-                          </button>
-                        ) : null}
-                      </div>
-
-                      <div className="entry-grid initiative-grid">
-                        <label>
-                          Name
-                          <input
-                            value={initiative.name}
-                            onChange={(event) =>
-                              updateInitiative(initiative.id, "name", event.target.value)
-                            }
-                          />
-                        </label>
-
-                        <label>
-                          Theme
-                          <input
-                            value={initiative.theme}
-                            onChange={(event) =>
-                              updateInitiative(initiative.id, "theme", event.target.value)
-                            }
-                          />
-                        </label>
-
-                        <label>
-                          Start Date
-                          <input
-                            type="date"
-                            value={initiative.startDate}
-                            onChange={(event) =>
-                              updateInitiative(initiative.id, "startDate", event.target.value)
-                            }
-                          />
-                        </label>
-
-                        <label>
-                          End Date
-                          <input
-                            type="date"
-                            value={initiative.endDate}
-                            onChange={(event) =>
-                              updateInitiative(initiative.id, "endDate", event.target.value)
-                            }
-                          />
-                        </label>
-                      </div>
-
-                      <label>
-                        Narrative
-                        <textarea
-                          value={initiative.narrative}
-                          onChange={(event) =>
-                            updateInitiative(initiative.id, "narrative", event.target.value)
-                          }
-                          rows="3"
-                        />
-                      </label>
-
-                      <div className="date-note">
-                        {getQuarterTags(startDate, endDate).map((tag) => (
-                          <span key={`${initiative.id}-${tag}`}>{tag}</span>
-                        ))}
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            </section>
-
-            <section className="input-section">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Work Items</p>
-                  <h3>Structured execution inputs</h3>
-                </div>
-                <button type="button" className="primary-button" onClick={addWorkItem}>
-                  Add Work Item
-                </button>
-              </div>
-
-              <div className="card-stack">
-                {state.workItems.map((item, index) => (
-                  <article className="entry-card" key={item.id}>
-                    <div className="card-topline">
-                      <strong>Work Item {index + 1}</strong>
-                      {state.workItems.length > 1 ? (
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          onClick={() => removeWorkItem(item.id)}
-                        >
-                          Remove
-                        </button>
-                      ) : null}
-                    </div>
-
-                    <div className="entry-grid work-item-grid">
-                      <label>
-                        Initiative
-                        <select
-                          value={item.initiativeId}
-                          onChange={(event) =>
-                            updateWorkItem(item.id, "initiativeId", event.target.value)
-                          }
-                        >
-                          {state.initiatives.map((initiative) => (
-                            <option key={initiative.id} value={initiative.id}>
-                              {initiative.name || "Untitled initiative"}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label>
-                        Item Name
-                        <input
-                          value={item.name}
-                          onChange={(event) =>
-                            updateWorkItem(item.id, "name", event.target.value)
-                          }
-                        />
-                      </label>
-
-                      <label>
-                        Owner
-                        <input
-                          value={item.owner}
-                          onChange={(event) =>
-                            updateWorkItem(item.id, "owner", event.target.value)
-                          }
-                        />
-                      </label>
-
-                      <label>
-                        Status
-                        <select
-                          value={item.status}
-                          onChange={(event) =>
-                            updateWorkItem(item.id, "status", event.target.value)
-                          }
-                        >
-                          {STATUS_OPTIONS.map((status) => (
-                            <option key={status} value={status}>
-                              {status}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label>
-                        Start Date
-                        <input
-                          type="date"
-                          value={item.startDate}
-                          onChange={(event) =>
-                            updateWorkItem(item.id, "startDate", event.target.value)
-                          }
-                        />
-                      </label>
-
-                      <label>
-                        End Date
-                        <input
-                          type="date"
-                          value={item.endDate}
-                          onChange={(event) =>
-                            updateWorkItem(item.id, "endDate", event.target.value)
-                          }
-                        />
-                      </label>
-
-                      <label>
-                        Duration (months)
-                        <input
-                          type="number"
-                          min="1"
-                          value={item.duration}
-                          onChange={(event) =>
-                            updateWorkItem(item.id, "duration", event.target.value)
-                          }
-                        />
-                      </label>
-                    </div>
-
-                    <label>
-                      Dependencies
-                      <select
-                        multiple
-                        value={item.dependencyIds}
-                        onChange={(event) =>
-                          updateWorkItemDependencies(
-                            item.id,
-                            Array.from(event.target.selectedOptions, (option) => option.value),
-                          )
-                        }
-                        className="multi-select"
-                      >
-                        {state.workItems
-                          .filter((candidate) => candidate.id !== item.id)
-                          .map((candidate) => {
-                            const initiativeName =
-                              state.initiatives.find(
-                                (initiative) => initiative.id === candidate.initiativeId,
-                              )?.name || "Initiative";
-
-                            return (
-                              <option key={candidate.id} value={candidate.id}>
-                                {initiativeName} :: {candidate.name || "Unnamed work item"}
-                              </option>
-                            );
-                          })}
-                      </select>
-                    </label>
-                  </article>
-                ))}
-              </div>
-            </section>
-
-            <section className="input-section">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Milestones</p>
-                  <h3>Quarter signals</h3>
-                </div>
-                <button type="button" className="primary-button" onClick={addMilestone}>
-                  Add Milestone
-                </button>
-              </div>
-
-              <div className="card-stack">
-                {state.milestones.map((milestone, index) => (
-                  <article className="entry-card" key={milestone.id}>
-                    <div className="card-topline">
-                      <strong>Milestone {index + 1}</strong>
-                      {state.milestones.length > 1 ? (
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          onClick={() => removeMilestone(milestone.id)}
-                        >
-                          Remove
-                        </button>
-                      ) : null}
-                    </div>
-
-                    <div className="entry-grid milestone-grid">
-                      <label>
-                        Initiative
-                        <select
-                          value={milestone.initiativeId}
-                          onChange={(event) =>
-                            updateMilestone(milestone.id, "initiativeId", event.target.value)
-                          }
-                        >
-                          {state.initiatives.map((initiative) => (
-                            <option key={initiative.id} value={initiative.id}>
-                              {initiative.name || "Untitled initiative"}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label>
-                        Milestone Date
-                        <input
-                          type="date"
-                          value={milestone.date}
-                          onChange={(event) =>
-                            updateMilestone(milestone.id, "date", event.target.value)
-                          }
-                        />
-                      </label>
-
-                      <label>
-                        Label
-                        <input
-                          value={milestone.label}
-                          onChange={(event) =>
-                            updateMilestone(milestone.id, "label", event.target.value)
-                          }
-                        />
-                      </label>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
-          </section>
-
-          <aside className="panel side-panel">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Overview</p>
-                <h2>Workbook overview</h2>
-              </div>
-            </div>
-
-            <div className="summary-metric-grid">
-              <div className="metric-card">
-                <span>Sheets / Initiatives</span>
-                <strong>{state.initiatives.length}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Work Items</span>
-                <strong>{state.workItems.length}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Milestones</span>
-                <strong>{state.milestones.length}</strong>
-              </div>
-              <div className="metric-card">
-                <span>Themes</span>
-                <strong>{roadmapModel.uniqueThemes.length}</strong>
-              </div>
-            </div>
-
-            <div className="theme-stack">
-              <p className="eyebrow">Theme Library</p>
-              <div className="badge-row">
-                {roadmapModel.uniqueThemes.length > 0 ? (
-                  roadmapModel.uniqueThemes.map((theme) => (
-                    <span className="theme-pill" key={theme}>
-                      {theme}
-                    </span>
-                  ))
-                ) : (
-                  <span className="theme-pill muted-pill">Add themes in Excel or manually</span>
-                )}
-              </div>
-            </div>
-
-            <div className="preview-card">
-              <p className="hero-label">Auto-detected timeline</p>
-              <strong>
-                {roadmapModel.timeline[0]?.label} to{" "}
-                {roadmapModel.timeline[roadmapModel.timeline.length - 1]?.label}
-              </strong>
-              <p>
-                Initiative dates come from each sheet name plus imported row
-                dates. You can adjust them after import.
-              </p>
-            </div>
-
-            <div className="action-row">
-              <button type="button" className="secondary-button" onClick={exportJson}>
-                Export JSON
-              </button>
+            <div className="file-status-row">
+              <span className="file-pill">
+                {selectedFileName || "No file selected"}
+              </span>
               <button
                 type="button"
                 className="primary-button"
-                onClick={() =>
-                  setState((current) => ({ ...current, activePage: "roadmap" }))
-                }
+                onClick={generateRoadmap}
               >
-                Open Roadmap
+                Generate Roadmap
               </button>
             </div>
-          </aside>
+
+            {importMessage ? <p className="subtle-copy">{importMessage}</p> : null}
+          </section>
         </main>
       ) : (
         <main className="roadmap-layout">
@@ -1552,9 +1065,17 @@ function App() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Delivery Roadmap</p>
-                <h2>Modern Delivery Roadmap</h2>
+                <h2>
+                  {[
+                    state.portfolioName || "",
+                    state.teamName || "",
+                    "Delivery Roadmap",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                </h2>
                 <p className="subtle-copy">
-                  {state.portfolioName} | {state.audience}
+                  {state.audience}
                 </p>
               </div>
 
@@ -1567,6 +1088,13 @@ function App() {
                   }
                 >
                   Back to Inputs
+                </button>
+                <button
+                  type="button"
+                  className={showDependencies ? "secondary-button toggled" : "secondary-button"}
+                  onClick={() => setShowDependencies((current) => !current)}
+                >
+                  {showDependencies ? "Hide Dependencies" : "Show Dependencies"}
                 </button>
                 <button type="button" className="primary-button" onClick={exportJson}>
                   Export JSON
@@ -1583,14 +1111,46 @@ function App() {
                 </strong>
               </div>
               <div>
-                <p className="signal-label">Execution Health</p>
+                <p className="signal-label">Dependency Status</p>
                 <strong>
-                  {roadmapModel.hasCycle ? "Dependency conflict detected" : "Sequencing ready"}
+                  {roadmapModel.hasCycle ? "Review required" : "Ready"}
                 </strong>
               </div>
               <div>
-                <p className="signal-label">Themes</p>
-                <strong>{roadmapModel.uniqueThemes.join(", ") || "No themes yet"}</strong>
+                <p className="signal-label">Initiatives</p>
+                <strong>{roadmapModel.preparedInitiatives.length}</strong>
+              </div>
+            </div>
+
+            <div className="range-panel">
+              <div>
+                <p className="signal-label">Visible Range</p>
+                <strong>
+                  {visibleTimeline[0]?.label || "Start"} to{" "}
+                  {visibleTimeline[visibleTimeline.length - 1]?.label || "End"}
+                </strong>
+              </div>
+              <div className="slider-grid">
+                <label>
+                  <span>From</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max={Math.max(0, roadmapModel.timeline.length - 1)}
+                    value={visibleStartIndex}
+                    onChange={handleVisibleStartChange}
+                  />
+                </label>
+                <label>
+                  <span>To</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max={Math.max(0, roadmapModel.timeline.length - 1)}
+                    value={visibleEndIndex}
+                    onChange={handleVisibleEndChange}
+                  />
+                </label>
               </div>
             </div>
 
@@ -1599,7 +1159,7 @@ function App() {
                 <div className="timeline-header">
                   <div className="lane-label sticky-column">Initiative / Item</div>
                   <div className="month-grid">
-                    {roadmapModel.timeline.map((month) => (
+                    {visibleTimeline.map((month) => (
                       <div key={month.label} className="month-cell">
                         <span>{month.shortLabel}</span>
                         <small>{month.quarter}</small>
@@ -1612,20 +1172,43 @@ function App() {
                   const items = roadmapModel.scheduledItems.filter(
                     (item) => item.initiative?.id === initiative.id,
                   );
-                  const milestones = roadmapModel.preparedMilestones.filter(
-                    (milestone) => milestone.initiative?.id === initiative.id,
+                  const completedCount = items.filter(
+                    (item) => item.status === "Done",
+                  ).length;
+                  const visibleItems = items.filter(
+                    (item) =>
+                      item.displayEndIndex >= visibleStartIndex &&
+                      item.startIndex <= visibleEndIndex,
                   );
+                  const isCollapsed = collapsedInitiatives[initiative.id] ?? true;
 
                   return (
-                    <section className="initiative-lane" key={initiative.id}>
-                      <div className="sticky-column initiative-label">
-                        <p>{initiative.name || "Untitled initiative"}</p>
-                        <span>{initiative.theme || "Theme pending"}</span>
-                      </div>
+                    <section
+                      className={`initiative-lane ${isCollapsed ? "collapsed" : ""}`}
+                      key={initiative.id}
+                    >
+                      <button
+                        type="button"
+                        className="initiative-toggle"
+                        onClick={() => toggleInitiative(initiative.id)}
+                      >
+                        <div className="sticky-column initiative-label">
+                          <p>{initiative.name || "Untitled initiative"}</p>
+                          <span>
+                            {completedCount}/{items.length} completed
+                          </span>
+                        </div>
+                        <span className={`chevron ${isCollapsed ? "" : "open"}`}>
+                          ▾
+                        </span>
+                      </button>
 
-                      <div className="lane-rows">
-                        {items.map((item) => {
+                      {!isCollapsed ? (
+                        <div className="lane-rows">
+                          {visibleItems.map((item) => {
                           const isExpanded = expandedItemId === item.id;
+                          const visibleBarStart = Math.max(item.startIndex, visibleStartIndex);
+                          const visibleBarEnd = Math.min(item.displayEndIndex, visibleEndIndex);
 
                           return (
                             <div className="item-shell" key={item.id}>
@@ -1639,7 +1222,9 @@ function App() {
                                 }
                               >
                                 <div className="sticky-column item-meta compact">
-                                  <strong>{item.name || "Unnamed work item"}</strong>
+                                  <strong>
+                                    {item.itemNumber}. {item.name || "Unnamed work item"}
+                                  </strong>
                                 </div>
 
                                 <div className="roadmap-track">
@@ -1649,24 +1234,43 @@ function App() {
                                         item.status === "Done" ? "done" : ""
                                       } ${item.status === "In Progress" ? "progress" : ""}`}
                                       style={{
-                                        gridColumn: `${item.startIndex + 1} / ${item.displayEndIndex + 2}`,
+                                        gridColumn: `${visibleBarStart - visibleStartIndex + 1} / ${
+                                          visibleBarEnd - visibleStartIndex + 2
+                                        }`,
                                       }}
                                     >
                                       <span className="span-title">
                                         {roadmapModel.timeline[item.startIndex]?.shortLabel || "Start"} -{" "}
                                         {roadmapModel.timeline[item.displayEndIndex]?.shortLabel || "End"}
                                       </span>
+                                      {roadmapModel.preparedMilestones.some(
+                                        (milestone) => milestone.itemId === item.id,
+                                      ) ? (
+                                        <span className="milestone-inline-indicator" />
+                                      ) : null}
                                       <span className="span-status">{item.status}</span>
                                     </div>
-                                    {milestones.map((milestone) => (
-                                      <span
-                                        key={`${item.id}-${milestone.id}`}
-                                        className="timeline-marker"
-                                        style={{ gridColumn: `${milestone.monthIndex + 1}` }}
-                                        title={milestone.label}
-                                        aria-label={milestone.label}
-                                      />
-                                    ))}
+                                    {showDependencies && item.dependencyNames.length > 0 ? (
+                                      <div
+                                        className="dependency-inline"
+                                        style={{
+                                          gridColumn: `1 / ${
+                                            Math.max(
+                                              2,
+                                              visibleBarStart - visibleStartIndex + 1,
+                                            )
+                                          }`,
+                                        }}
+                                      >
+                                        <span className="dependency-inline-line" />
+                                        <span className="dependency-inline-pill">
+                                          Depends on{" "}
+                                          {item.dependencyItemNumbers.length > 0
+                                            ? item.dependencyItemNumbers.join(", ")
+                                            : item.dependencyNames.length}
+                                        </span>
+                                      </div>
+                                    ) : null}
                                   </div>
                                 </div>
                               </button>
@@ -1681,15 +1285,35 @@ function App() {
                                   </span>
                                   <span>
                                     {item.dependencyNames.length > 0
-                                      ? `Depends on: ${item.dependencyNames.join(", ")}`
+                                      ? `Depends on: ${
+                                          item.dependencyItemNumbers.length > 0
+                                            ? item.dependencyItemNumbers.join(", ")
+                                            : item.dependencyNames.join(", ")
+                                        }`
                                       : "No blockers"}
                                   </span>
+                                  {roadmapModel.preparedMilestones
+                                    .filter((milestone) => milestone.itemId === item.id)
+                                    .map((milestone) => (
+                                      <span key={milestone.id} className="milestone-pill">
+                                        Milestone: {milestone.label} ({milestone.quarter})
+                                      </span>
+                                    ))}
+                                  {item.description ? (
+                                    <p className="detail-description">{item.description}</p>
+                                  ) : null}
                                 </div>
                               ) : null}
                             </div>
                           );
-                        })}
-                      </div>
+                          })}
+                          {visibleItems.length === 0 ? (
+                            <p className="empty-copy compact-empty">
+                              No active items in the selected month range.
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </section>
                   );
                 })}
@@ -1698,43 +1322,52 @@ function App() {
           </section>
 
           <section className="panel dependency-panel">
-            <div className="section-heading">
+            <button
+              type="button"
+              className="section-toggle"
+              onClick={() => setDependencyPanelOpen((current) => !current)}
+            >
               <div>
                 <p className="eyebrow">Dependency Map</p>
                 <h2>Execution sequencing</h2>
               </div>
-            </div>
+              <span className={`chevron ${dependencyPanelOpen ? "open" : ""}`}>▾</span>
+            </button>
 
-            <div className="dependency-grid">
-              {roadmapModel.dependencyMap.length > 0 ? (
-                roadmapModel.dependencyMap.map((link) => (
-                  <article className="dependency-card" key={link.id}>
-                    <span className="dependency-pill">{link.from}</span>
-                    <span className="dependency-arrow">leads to</span>
-                    <span className="dependency-pill target">{link.to}</span>
-                    <p>{link.note}</p>
-                  </article>
-                ))
-              ) : (
-                <p className="empty-copy">
-                  Add dependencies in Excel or the input page to populate the dependency map.
-                </p>
-              )}
-            </div>
+            {dependencyPanelOpen ? (
+              <div className="dependency-grid">
+                {roadmapModel.dependencyMap.length > 0 ? (
+                  roadmapModel.dependencyMap.map((link) => (
+                    <article className="dependency-card" key={link.id}>
+                      <span className="dependency-pill">{link.from}</span>
+                      <span className="dependency-arrow">leads to</span>
+                      <span className="dependency-pill target">{link.to}</span>
+                      <p>{link.note}</p>
+                    </article>
+                  ))
+                ) : (
+                  <p className="empty-copy">
+                    Add dependencies in Excel or the input page to populate the dependency map.
+                  </p>
+                )}
+              </div>
+            ) : null}
           </section>
 
           <section className="panel summary-panel">
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Executive Summary</p>
-                <h2>Leadership narrative</h2>
+                <h2>Executive Summary</h2>
               </div>
             </div>
 
             <div className="summary-stack">
               {roadmapModel.executiveSummaries.map((summary) => (
                 <article className="summary-card" key={summary.id}>
-                  <p className="summary-kicker">{summary.theme}</p>
+                  {summary.theme ? (
+                    <p className="summary-kicker">{summary.theme}</p>
+                  ) : null}
                   <h3>{summary.title}</h3>
                   <ul>
                     {summary.bullets.map((bullet) => (
