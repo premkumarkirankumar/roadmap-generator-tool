@@ -608,6 +608,7 @@ function buildStateFromWorkbook(workbook, currentState) {
           String(getRowValue(row, ["status"])).trim() || "Planned",
         dependencyIds: [],
         dependencyRefs: [],
+        progress: 0,
       };
       const dependencyText = String(
         getRowValue(row, ["dependencies", "dependency", "dependson"]),
@@ -772,6 +773,36 @@ function downloadJsonFile(payload, filename) {
   URL.revokeObjectURL(url);
 }
 
+function normalizeWorkItems(items) {
+  return items.map((item) => ({
+    ...item,
+    progress: typeof item.progress === "number" ? item.progress : 0,
+  }));
+}
+
+function calculateInitiativeProgress(items) {
+  if (items.length === 0) return 0;
+  const totalProgress = items.reduce((sum, item) => sum + (item.progress || 0), 0);
+  return Math.round(totalProgress / items.length);
+}
+
+function calculatePortfolioProgress(initiatives, items) {
+  const initiativeProgressValues = initiatives.map((initiative) => {
+    const initiativeItems = items.filter((item) => item.initiativeId === initiative.id);
+    return calculateInitiativeProgress(initiativeItems);
+  });
+
+  if (initiativeProgressValues.length === 0) return 0;
+  const totalProgress = initiativeProgressValues.reduce((sum, progress) => sum + progress, 0);
+  return Math.round(totalProgress / initiativeProgressValues.length);
+}
+
+function getProgressBadgeColor(progress) {
+  if (progress < 34) return "progress-badge-red";
+  if (progress < 67) return "progress-badge-yellow";
+  return "progress-badge-green";
+}
+
 function App() {
   const [state, setState] = useState(() => {
     if (typeof window === "undefined") {
@@ -794,7 +825,7 @@ function App() {
           ? parsed.initiatives
           : defaultState.initiatives,
         workItems: Array.isArray(parsed.workItems)
-          ? parsed.workItems
+          ? normalizeWorkItems(parsed.workItems)
           : defaultState.workItems,
         milestones: Array.isArray(parsed.milestones)
           ? parsed.milestones
@@ -1111,9 +1142,9 @@ function App() {
                 </strong>
               </div>
               <div>
-                <p className="signal-label">Dependency Status</p>
-                <strong>
-                  {roadmapModel.hasCycle ? "Review required" : "Ready"}
+                <p className="signal-label">Overall Progress</p>
+                <strong className={getProgressBadgeColor(calculatePortfolioProgress(roadmapModel.preparedInitiatives, state.workItems))}>
+                  {calculatePortfolioProgress(roadmapModel.preparedInitiatives, state.workItems)}% average
                 </strong>
               </div>
               <div>
@@ -1194,8 +1225,8 @@ function App() {
                       >
                         <div className="sticky-column initiative-label">
                           <p>{initiative.name || "Untitled initiative"}</p>
-                          <span>
-                            {completedCount}/{items.length} completed
+                          <span className={`initiative-progress ${getProgressBadgeColor(calculateInitiativeProgress(items))}`}>
+                            {calculateInitiativeProgress(items)}% avg progress
                           </span>
                         </div>
                         <span className={`chevron ${isCollapsed ? "" : "open"}`}>
@@ -1250,6 +1281,25 @@ function App() {
                                       ) : null}
                                       <span className="span-status">{item.status}</span>
                                     </div>
+                                    <div
+                                      className="progress-bar-container"
+                                      style={{
+                                        gridColumn: `${visibleBarStart - visibleStartIndex + 1} / ${
+                                          visibleBarEnd - visibleStartIndex + 2
+                                        }`,
+                                      }}
+                                    >
+                                      <div className="progress-bar">
+                                        <div
+                                          className="progress-bar-fill"
+                                          style={{ width: `${item.progress || 0}%` }}
+                                        >
+                                          {(item.progress || 0) > 10 && (
+                                            <span className="progress-percentage">{item.progress || 0}%</span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
                                     {showDependencies && item.dependencyNames.length > 0 ? (
                                       <div
                                         className="dependency-inline"
@@ -1292,6 +1342,21 @@ function App() {
                                         }`
                                       : "No blockers"}
                                   </span>
+                                  <div className="progress-control-wrapper">
+                                    <label>
+                                      Progress: {item.progress || 0}%
+                                      <input
+                                        type="range"
+                                        min="0"
+                                        max="100"
+                                        value={item.progress || 0}
+                                        onChange={(event) =>
+                                          updateWorkItem(item.id, "progress", Number.parseInt(event.target.value, 10))
+                                        }
+                                        className="progress-slider"
+                                      />
+                                    </label>
+                                  </div>
                                   {roadmapModel.preparedMilestones
                                     .filter((milestone) => milestone.itemId === item.id)
                                     .map((milestone) => (
