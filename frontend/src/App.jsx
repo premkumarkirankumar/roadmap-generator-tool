@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import {
   isSharedStorageConfigured,
+  loadSharedRoadmapMeta,
   loadSharedRoadmapState,
   saveSharedRoadmapState,
   signInToSharedMode,
@@ -25,6 +26,26 @@ const MONTH_NAMES = [
   "Oct",
   "Nov",
   "Dec",
+];
+const SHARED_ROADMAP_SLOTS = [
+  {
+    key: "systems-team",
+    label: "Systems Team Roadmap",
+    teamName: "Systems Team",
+    fixed: true,
+  },
+  {
+    key: "production-support-team",
+    label: "Production Support Team Roadmap",
+    teamName: "Production Support Team",
+    fixed: true,
+  },
+  {
+    key: "custom-team",
+    label: "New Team Preview",
+    teamName: "",
+    fixed: false,
+  },
 ];
 
 const defaultState = {
@@ -1010,6 +1031,23 @@ function loadLocalSnapshot() {
   }
 }
 
+function formatRelativeSnapshotTime(updatedAtMs) {
+  if (!updatedAtMs) {
+    return "Not saved yet";
+  }
+
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(updatedAtMs));
+  } catch {
+    return "Recently updated";
+  }
+}
+
 function calculateInitiativeProgress(items) {
   if (items.length === 0) return 0;
   const totalProgress = items.reduce((sum, item) => sum + (item.progress || 0), 0);
@@ -1057,12 +1095,110 @@ function App() {
   const [sharedUser, setSharedUser] = useState(null);
   const [authReady, setAuthReady] = useState(() => !isSharedStorageConfigured());
   const [sharedSnapshotLoaded, setSharedSnapshotLoaded] = useState(false);
+  const [selectedRoadmapKey, setSelectedRoadmapKey] = useState("");
+  const [sharedRoadmapMeta, setSharedRoadmapMeta] = useState(() =>
+    Object.fromEntries(
+      SHARED_ROADMAP_SLOTS.map((slot) => [
+        slot.key,
+        {
+          exists: false,
+          roadmapKey: slot.key,
+          roadmapLabel: slot.label,
+          teamName: slot.teamName,
+          updatedBy: "",
+          updatedAtMs: 0,
+        },
+      ]),
+    ),
+  );
+  const [pendingSharedUploads, setPendingSharedUploads] = useState({});
+  const [customSharedTeamName, setCustomSharedTeamName] = useState("");
+  const [lastSavedRoadmapKey, setLastSavedRoadmapKey] = useState("");
+
+  async function refreshSharedRoadmapMeta(userId) {
+    if (!userId) {
+      return;
+    }
+
+    const entries = await Promise.all(
+      SHARED_ROADMAP_SLOTS.map(async (slot) => {
+        const meta = await loadSharedRoadmapMeta(userId, slot.key);
+
+        return [
+          slot.key,
+          {
+            exists: meta?.exists || false,
+            roadmapKey: slot.key,
+            roadmapLabel: meta?.roadmapLabel || slot.label,
+            teamName: meta?.teamName || slot.teamName,
+            updatedBy: meta?.updatedBy || "",
+            updatedAtMs: meta?.updatedAtMs || 0,
+          },
+        ];
+      }),
+    );
+
+    setSharedRoadmapMeta(Object.fromEntries(entries));
+  }
+
+  async function loadSharedRoadmapSlot(roadmapKey) {
+    if (!sharedUser) {
+      return;
+    }
+
+    setSharedSnapshotLoaded(false);
+
+    try {
+      const sharedState = await loadSharedRoadmapState(sharedUser.uid, roadmapKey);
+      const slot = SHARED_ROADMAP_SLOTS.find((entry) => entry.key === roadmapKey);
+      const meta = sharedRoadmapMeta[roadmapKey];
+
+      if (sharedState) {
+        setState((current) => ({
+          ...current,
+          ...normalizePersistedState(sharedState),
+          activePage: "roadmap",
+        }));
+        setImportMessage("Shared roadmap snapshot loaded.");
+      } else {
+        setState((current) => ({
+          ...current,
+          activePage: "input",
+          teamName: meta?.teamName || slot?.teamName || current.teamName,
+        }));
+        setImportMessage("No saved snapshot yet. Upload a workbook to create it.");
+      }
+
+      if (slot && !slot.fixed) {
+        setCustomSharedTeamName(meta?.teamName || "");
+      }
+      setSelectedRoadmapKey(roadmapKey);
+    } catch {
+      setImportMessage("Unable to load that shared roadmap right now.");
+    } finally {
+      setSharedSnapshotLoaded(true);
+    }
+  }
 
   useEffect(() => {
     if (entryMode === "local") {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(getShareableState(state)));
     }
   }, [entryMode, state]);
+
+  useEffect(() => {
+    if (!lastSavedRoadmapKey) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setLastSavedRoadmapKey("");
+    }, 3500);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [lastSavedRoadmapKey]);
 
   useEffect(() => {
     if (!isSharedStorageConfigured()) {
@@ -1079,6 +1215,7 @@ function App() {
     if (entryMode === "shared" && authReady && !sharedUser) {
       setEntryMode("");
       setSharedSnapshotLoaded(false);
+      setSelectedRoadmapKey("");
       setState((current) => ({
         ...current,
         activePage: "mode",
@@ -1096,26 +1233,21 @@ function App() {
 
     let cancelled = false;
 
-    async function hydrateSharedState() {
+    async function hydrateSharedWorkspace() {
       try {
-        const sharedState = await loadSharedRoadmapState(sharedUser.uid);
+        await refreshSharedRoadmapMeta(sharedUser.uid);
 
         if (cancelled) {
           return;
         }
 
-        if (sharedState) {
-          setState((current) => ({
-            ...current,
-            ...normalizePersistedState(sharedState),
-          }));
-          setImportMessage("Shared roadmap snapshot loaded.");
-        } else {
+        setSharedSnapshotLoaded(true);
+
+        if (!selectedRoadmapKey) {
           setImportMessage(
-            "Shared storage is connected. Import a workbook to create the first shared snapshot.",
+            "Choose a roadmap slot below, then upload a workbook or open an existing saved roadmap.",
           );
         }
-        setSharedSnapshotLoaded(true);
       } catch {
         if (!cancelled) {
           setImportMessage(
@@ -1126,15 +1258,20 @@ function App() {
       }
     }
 
-    hydrateSharedState();
+    hydrateSharedWorkspace();
 
     return () => {
       cancelled = true;
     };
-  }, [entryMode, sharedUser]);
+  }, [entryMode, sharedUser, selectedRoadmapKey]);
 
   useEffect(() => {
-    if (entryMode !== "shared" || !sharedUser || !sharedSnapshotLoaded) {
+    if (
+      entryMode !== "shared" ||
+      !sharedUser ||
+      !sharedSnapshotLoaded ||
+      !selectedRoadmapKey
+    ) {
       return undefined;
     }
 
@@ -1142,7 +1279,16 @@ function App() {
 
     async function persistSharedState() {
       try {
-        await saveSharedRoadmapState(sharedUser.uid, getShareableState(state));
+        const meta = sharedRoadmapMeta[selectedRoadmapKey];
+        await saveSharedRoadmapState(sharedUser.uid, selectedRoadmapKey, getShareableState(state), {
+          roadmapLabel:
+            meta?.roadmapLabel ||
+            SHARED_ROADMAP_SLOTS.find((slot) => slot.key === selectedRoadmapKey)?.label ||
+            "Team Roadmap",
+          teamName: state.teamName || meta?.teamName || "",
+          updatedBy: sharedUser.email || "",
+        });
+        await refreshSharedRoadmapMeta(sharedUser.uid);
       } catch {
         if (!cancelled) {
           setImportMessage(
@@ -1157,7 +1303,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [entryMode, sharedUser, sharedSnapshotLoaded, state]);
+  }, [entryMode, sharedUser, sharedSnapshotLoaded, selectedRoadmapKey, state]);
 
   const roadmapModel = useMemo(() => {
     const timeline = deriveTimeline(state);
@@ -1268,7 +1414,58 @@ function App() {
       setImportMessage(
         "Import failed. Check that the workbook is a valid .xlsx file with row headers.",
       );
+    } finally {
+      event.target.value = "";
     }
+  }
+
+  async function handleSharedFileSelection(roadmapKey, event) {
+    const file = event.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, {
+        type: "array",
+        cellDates: true,
+      });
+
+      setPendingSharedUploads((current) => ({
+        ...current,
+        [roadmapKey]: {
+          workbook,
+          fileName: file.name,
+        },
+      }));
+      setImportMessage("File ready. Click Generate Roadmap to update that team.");
+    } catch {
+      setPendingSharedUploads((current) => {
+        const next = { ...current };
+        delete next[roadmapKey];
+        return next;
+      });
+      setImportMessage(
+        "Import failed. Check that the workbook is a valid .xlsx file with row headers.",
+      );
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  function clearLocalPendingUpload() {
+    setPendingWorkbook(null);
+    setSelectedFileName("");
+  }
+
+  function clearSharedPendingUpload(roadmapKey) {
+    setPendingSharedUploads((current) => {
+      const next = { ...current };
+      delete next[roadmapKey];
+      return next;
+    });
   }
 
   function generateRoadmap() {
@@ -1292,6 +1489,78 @@ function App() {
     setImportMessage(`Roadmap generated from ${selectedFileName}.`);
   }
 
+  async function generateSharedRoadmap(roadmapKey) {
+    const pendingUpload = pendingSharedUploads[roadmapKey];
+
+    if (!pendingUpload?.workbook) {
+      setImportMessage("Select an Excel file before generating the roadmap.");
+      return;
+    }
+
+    const slot = SHARED_ROADMAP_SLOTS.find((entry) => entry.key === roadmapKey);
+    const fixedTeamName = slot?.fixed ? slot.teamName : "";
+    const targetTeamName =
+      fixedTeamName ||
+      customSharedTeamName.trim() ||
+      sharedRoadmapMeta[roadmapKey]?.teamName ||
+      "New Team";
+    let previousSharedState = null;
+
+    if (sharedUser) {
+      try {
+        previousSharedState = await loadSharedRoadmapState(sharedUser.uid, roadmapKey);
+      } catch {
+        previousSharedState = null;
+      }
+    }
+    const previousWorkItems = normalizePersistedState(previousSharedState || {}).workItems;
+    const nextComputedState = (() => {
+      const seedState = {
+        ...state,
+        teamName: targetTeamName,
+      };
+      const nextState = buildStateFromWorkbook(pendingUpload.workbook, seedState);
+
+      return {
+        ...nextState,
+        teamName: targetTeamName,
+        importDiff: compareImportStates(previousWorkItems, nextState.workItems),
+      };
+    })();
+
+    if (sharedUser) {
+      try {
+        await saveSharedRoadmapState(
+          sharedUser.uid,
+          roadmapKey,
+          getShareableState(nextComputedState),
+          {
+            roadmapLabel: slot?.label || "Team Roadmap",
+            teamName: targetTeamName,
+            updatedBy: sharedUser.email || "",
+          },
+        );
+        await refreshSharedRoadmapMeta(sharedUser.uid);
+      } catch {
+        setImportMessage(
+          "Shared storage save failed. Check Firebase sign-in and Firestore rules, or switch to local mode.",
+        );
+        return;
+      }
+    }
+
+    setSelectedRoadmapKey(roadmapKey);
+    setLastSavedRoadmapKey(roadmapKey);
+    setSharedSnapshotLoaded(true);
+    setShowRemovedItems(false);
+    setState(() => ({
+      ...nextComputedState,
+      activePage: "roadmap",
+    }));
+    clearSharedPendingUpload(roadmapKey);
+    setImportMessage(`${targetTeamName} roadmap generated from ${pendingUpload.fileName}.`);
+  }
+
   async function enterSharedMode() {
     if (!isSharedStorageConfigured()) {
       setImportMessage(
@@ -1305,6 +1574,7 @@ function App() {
         await signInToSharedMode();
       }
 
+      setSelectedRoadmapKey("");
       setSharedSnapshotLoaded(false);
       setEntryMode("shared");
       setState((current) => ({ ...current, activePage: "input" }));
@@ -1320,6 +1590,7 @@ function App() {
     const localSnapshot = loadLocalSnapshot();
 
     setEntryMode("local");
+    setSelectedRoadmapKey("");
     setSharedSnapshotLoaded(false);
     setState((current) => ({
       ...current,
@@ -1487,39 +1758,65 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="hero-band">
-        <div className="hero-copy">
-          <p className="eyebrow">Delivery Roadmap Creator</p>
-          <p className="lede">
-            Upload an Excel workbook and generate a compact delivery roadmap
-            that is ready to review or paste into leadership slides.
-          </p>
-        </div>
-      </header>
-
       <div className="workspace-topbar">
-        <div className="page-switcher">
-          <button
-            type="button"
-            className={state.activePage === "input" ? "tab-button active" : "tab-button"}
-            onClick={() => setState((current) => ({ ...current, activePage: "input" }))}
-          >
-            Input Page
-          </button>
-          <button
-            type="button"
-            className={state.activePage === "roadmap" ? "tab-button active" : "tab-button"}
-            onClick={() => setState((current) => ({ ...current, activePage: "roadmap" }))}
-          >
-            Delivery Roadmap
-          </button>
+        <div className="workspace-nav">
+          <div className="workspace-intro">
+            <p className="eyebrow">Delivery Roadmap Creator</p>
+            <p className="workspace-intro-copy">
+              Upload an Excel workbook and generate a compact delivery roadmap
+              that is ready to review or paste into leadership slides.
+            </p>
+          </div>
+          <div className="page-switcher">
+            <button
+              type="button"
+              className={state.activePage === "input" ? "tab-button active" : "tab-button"}
+              onClick={() => setState((current) => ({ ...current, activePage: "input" }))}
+            >
+              Input Page
+            </button>
+            <button
+              type="button"
+              className={state.activePage === "roadmap" ? "tab-button active" : "tab-button"}
+              onClick={() => setState((current) => ({ ...current, activePage: "roadmap" }))}
+            >
+              Delivery Roadmap
+            </button>
+          </div>
+          {entryMode === "shared" ? (
+            <div className="roadmap-shortcuts">
+              {SHARED_ROADMAP_SLOTS.filter(
+                (slot) => slot.fixed || sharedRoadmapMeta[slot.key]?.exists,
+              ).map((slot) => {
+                const meta = sharedRoadmapMeta[slot.key];
+                const label = meta?.teamName
+                  ? `${meta.teamName} Roadmap`
+                  : slot.label;
+
+                return (
+                  <button
+                    key={slot.key}
+                    type="button"
+                    className={
+                      selectedRoadmapKey === slot.key
+                        ? "shortcut-pill active"
+                        : "shortcut-pill"
+                    }
+                    onClick={() => loadSharedRoadmapSlot(slot.key)}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
         <button type="button" className="ghost-button" onClick={returnToHome}>
           Entry Mode
         </button>
       </div>
 
-      {state.activePage === "input" ? (
+      {state.activePage === "input" && entryMode === "local" ? (
         <main className="input-layout upload-only-layout">
           <section className="panel input-panel upload-panel">
             <div className="section-heading">
@@ -1546,9 +1843,7 @@ function App() {
             </p>
 
             <p className="subtle-copy">
-              {isSharedStorageConfigured()
-                ? "Shared snapshot storage is enabled through Firestore."
-                : "Shared snapshot storage is not configured yet. The browser snapshot will be used until Firebase web app keys are added."}
+              Local mode keeps the roadmap snapshot and import history in this browser only.
             </p>
 
             <label>
@@ -1571,6 +1866,16 @@ function App() {
             <div className="file-status-row">
               <span className="file-pill">
                 {selectedFileName || "No file selected"}
+                {selectedFileName ? (
+                  <button
+                    type="button"
+                    className="file-clear-button"
+                    onClick={clearLocalPendingUpload}
+                    aria-label="Remove selected file"
+                  >
+                    ×
+                  </button>
+                ) : null}
               </span>
               <button
                 type="button"
@@ -1579,6 +1884,185 @@ function App() {
               >
                 Generate Roadmap
               </button>
+            </div>
+
+            {importMessage ? <p className="subtle-copy">{importMessage}</p> : null}
+          </section>
+        </main>
+      ) : state.activePage === "input" ? (
+        <main className="input-layout upload-only-layout">
+          <section className="panel input-panel upload-panel shared-upload-panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Shared Team Workbooks</p>
+                <h2>Upload your roadmap workbook for existing teams</h2>
+              </div>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={downloadExcelTemplate}
+              >
+                Download Template
+              </button>
+            </div>
+
+            <p className="subtle-copy">
+              Shared mode stores each roadmap in Firestore under your Google
+              account, so the same team roadmap is available across browsers and machines.
+            </p>
+
+            <div className="shared-slot-grid">
+              {SHARED_ROADMAP_SLOTS.filter((slot) => slot.fixed).map((slot) => {
+                const pendingUpload = pendingSharedUploads[slot.key];
+                const meta = sharedRoadmapMeta[slot.key];
+
+                return (
+                  <article className="shared-slot-card" key={slot.key}>
+                    <div className="shared-slot-top">
+                      <div>
+                        <p className="signal-label">Existing Team</p>
+                        <h3>{slot.teamName}</h3>
+                      </div>
+                      <div className="shared-status-stack">
+                        <span className={meta?.exists ? "shared-status ready" : "shared-status"}>
+                          {meta?.exists ? "Saved" : "Not saved"}
+                        </span>
+                        {lastSavedRoadmapKey === slot.key ? (
+                          <span className="shared-status success">Saved successfully</span>
+                        ) : null}
+                      </div>
+                    </div>
+                    <p className="shared-meta-copy">
+                      Last updated: {formatRelativeSnapshotTime(meta?.updatedAtMs)}
+                      {meta?.updatedBy ? ` by ${meta.updatedBy}` : ""}
+                    </p>
+                    <label className="upload-dropzone shared-dropzone">
+                      <span className="upload-label">Select Excel File</span>
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={(event) => handleSharedFileSelection(slot.key, event)}
+                      />
+                    </label>
+                    <div className="file-status-row">
+                      <span className="file-pill">
+                        {pendingUpload?.fileName || "No file selected"}
+                        {pendingUpload?.fileName ? (
+                          <button
+                            type="button"
+                            className="file-clear-button"
+                            onClick={() => clearSharedPendingUpload(slot.key)}
+                            aria-label={`Remove selected file for ${slot.teamName}`}
+                          >
+                            ×
+                          </button>
+                        ) : null}
+                      </span>
+                    </div>
+                    <div className="shared-slot-actions">
+                      <button
+                        type="button"
+                        className="primary-button"
+                        onClick={() => generateSharedRoadmap(slot.key)}
+                      >
+                        Generate Roadmap
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => loadSharedRoadmapSlot(slot.key)}
+                      >
+                        Open Roadmap
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+
+            <div className="shared-custom-section">
+              <div>
+                <p className="eyebrow">New Team</p>
+                <h2>Create a new team preview</h2>
+              </div>
+              <article className="shared-slot-card">
+                <div className="shared-slot-top">
+                  <div>
+                    <p className="signal-label">Custom Team</p>
+                    <h3>{sharedRoadmapMeta["custom-team"]?.teamName || "New Team Preview"}</h3>
+                  </div>
+                  <div className="shared-status-stack">
+                    <span
+                      className={
+                        sharedRoadmapMeta["custom-team"]?.exists
+                          ? "shared-status ready"
+                          : "shared-status"
+                      }
+                    >
+                      {sharedRoadmapMeta["custom-team"]?.exists ? "Saved" : "Not saved"}
+                    </span>
+                    {lastSavedRoadmapKey === "custom-team" ? (
+                      <span className="shared-status success">Saved successfully</span>
+                    ) : null}
+                  </div>
+                </div>
+                <p className="shared-meta-copy">
+                  Last updated: {formatRelativeSnapshotTime(sharedRoadmapMeta["custom-team"]?.updatedAtMs)}
+                  {sharedRoadmapMeta["custom-team"]?.updatedBy
+                    ? ` by ${sharedRoadmapMeta["custom-team"]?.updatedBy}`
+                    : ""}
+                </p>
+                <label>
+                  Team
+                  <input
+                    type="text"
+                    value={customSharedTeamName}
+                    onChange={(event) => setCustomSharedTeamName(event.target.value)}
+                    placeholder="Enter new team name"
+                  />
+                </label>
+                <label className="upload-dropzone shared-dropzone">
+                  <span className="upload-label">Select Excel File</span>
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls"
+                    onChange={(event) => handleSharedFileSelection("custom-team", event)}
+                  />
+                </label>
+                <div className="file-status-row">
+                  <span className="file-pill">
+                    {pendingSharedUploads["custom-team"]?.fileName || "No file selected"}
+                    {pendingSharedUploads["custom-team"]?.fileName ? (
+                      <button
+                        type="button"
+                        className="file-clear-button"
+                        onClick={() => clearSharedPendingUpload("custom-team")}
+                        aria-label="Remove selected file for new team"
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </span>
+                </div>
+                <div className="shared-slot-actions">
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => generateSharedRoadmap("custom-team")}
+                  >
+                    Generate Roadmap
+                  </button>
+                  {sharedRoadmapMeta["custom-team"]?.exists ? (
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => loadSharedRoadmapSlot("custom-team")}
+                    >
+                      Open Roadmap
+                    </button>
+                  ) : null}
+                </div>
+              </article>
             </div>
 
             {importMessage ? <p className="subtle-copy">{importMessage}</p> : null}

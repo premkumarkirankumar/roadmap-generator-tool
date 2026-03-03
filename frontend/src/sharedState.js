@@ -28,12 +28,12 @@ if (hasFirebaseConfig) {
   firestore = getFirestore(app);
 }
 
-function getSnapshotDoc(userId) {
+function getSnapshotDoc(userId, roadmapKey) {
   if (!firestore || !userId) {
     return null;
   }
 
-  return doc(firestore, "roadmapSnapshots", userId);
+  return doc(firestore, "roadmapUsers", userId, "roadmaps", roadmapKey);
 }
 
 export function isSharedStorageConfigured() {
@@ -68,8 +68,8 @@ export async function signOutFromSharedMode() {
   await signOut(auth);
 }
 
-export async function loadSharedRoadmapState(userId) {
-  const snapshotDoc = getSnapshotDoc(userId);
+export async function loadSharedRoadmapState(userId, roadmapKey) {
+  const snapshotDoc = getSnapshotDoc(userId, roadmapKey);
 
   if (!snapshotDoc) {
     return null;
@@ -84,16 +84,51 @@ export async function loadSharedRoadmapState(userId) {
   return snapshot.data()?.state || null;
 }
 
-export async function saveSharedRoadmapState(userId, state) {
-  const snapshotDoc = getSnapshotDoc(userId);
+export async function loadSharedRoadmapMeta(userId, roadmapKey) {
+  const snapshotDoc = getSnapshotDoc(userId, roadmapKey);
+
+  if (!snapshotDoc) {
+    return null;
+  }
+
+  const snapshot = await getDoc(snapshotDoc);
+
+  if (!snapshot.exists()) {
+    return {
+      exists: false,
+      roadmapKey,
+    };
+  }
+
+  const data = snapshot.data() || {};
+
+  return {
+    exists: true,
+    roadmapKey,
+    roadmapLabel: data.roadmapLabel || "",
+    teamName: data.teamName || "",
+    updatedBy: data.updatedBy || "",
+    updatedAtMs: data.updatedAtMs || 0,
+  };
+}
+
+export async function saveSharedRoadmapState(userId, roadmapKey, state, meta = {}) {
+  const snapshotDoc = getSnapshotDoc(userId, roadmapKey);
 
   if (!snapshotDoc) {
     return false;
   }
 
+  const updatedAtMs = Date.now();
+
   await setDoc(
     snapshotDoc,
     {
+      roadmapKey,
+      roadmapLabel: meta.roadmapLabel || "",
+      teamName: meta.teamName || "",
+      updatedBy: meta.updatedBy || "",
+      updatedAtMs,
       state,
       updatedAt: serverTimestamp(),
     },
