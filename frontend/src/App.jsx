@@ -1753,6 +1753,12 @@ function App() {
                   const completedCount = items.filter(
                     (item) => item.status === "Done",
                   ).length;
+                  const blockedCount = items.filter(
+                    (item) => item.status === "Blocked",
+                  ).length;
+                  const activeCount = items.filter(
+                    (item) => item.status !== "Done" && item.status !== "Blocked",
+                  ).length;
                   const visibleItems = items.filter(
                     (item) =>
                       item.displayEndIndex >= visibleStartIndex &&
@@ -1783,7 +1789,7 @@ function App() {
                             </span>
                           ) : null}
                           <span className="initiative-count">
-                            {items.length} item{items.length === 1 ? "" : "s"} • {completedCount} done
+                            {items.length} item{items.length === 1 ? "" : "s"} • {activeCount} active • {blockedCount} blocked • {completedCount} done
                           </span>
                         </div>
                         <span className={`chevron ${isCollapsed ? "" : "open"}`}>
