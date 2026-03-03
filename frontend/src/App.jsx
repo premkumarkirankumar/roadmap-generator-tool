@@ -1,9 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
+import {
+  isSharedStorageConfigured,
+  loadSharedRoadmapState,
+  saveSharedRoadmapState,
+  signInToSharedMode,
+  signOutFromSharedMode,
+  subscribeToSharedAuth,
+} from "./sharedState";
 import "./App.css";
 
 const STORAGE_KEY = "delivery-roadmap-creator-v3";
-const STATUS_OPTIONS = ["Planned", "In Progress", "At Risk", "Done"];
+const STATUS_OPTIONS = ["Planned", "In Progress", "At Risk", "Blocked", "Done"];
 const MONTH_NAMES = [
   "Jan",
   "Feb",
@@ -20,7 +28,7 @@ const MONTH_NAMES = [
 ];
 
 const defaultState = {
-  activePage: "input",
+  activePage: "landing",
   portfolioName: "Delivery Roadmap",
   teamName: "",
   audience: "Delivery leadership and cross-functional stakeholders",
@@ -29,6 +37,7 @@ const defaultState = {
   initiatives: [],
   workItems: [],
   milestones: [],
+  importDiff: null,
 };
 
 function parseDateInput(value) {
@@ -122,26 +131,6 @@ function parseQuarterString(value) {
   return formatDateInput(new Date(Date.UTC(year, monthIndex, 1)));
 }
 
-function formatRoadmapTitleFromFilename(fileName) {
-  const baseName = String(fileName || "")
-    .replace(/\.[^.]+$/, "")
-    .replace(/[_-]+/g, " ")
-    .trim();
-
-  if (!baseName) {
-    return "Delivery Roadmap";
-  }
-
-  const words = baseName.split(/\s+/).map((word) => {
-    if (!word) {
-      return word;
-    }
-
-    return word.charAt(0).toUpperCase() + word.slice(1);
-  });
-  return words.join(" ");
-}
-
 function startOfMonth(date) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
 }
@@ -178,7 +167,25 @@ function getQuarterRange(startDate, endDate) {
 }
 
 function clampStatus(status, atRisk) {
+  const normalized = String(status || "").trim().toLowerCase();
+
+  if (normalized === "blocked") {
+    return "Blocked";
+  }
+
   if (atRisk) {
+    return "At Risk";
+  }
+
+  if (normalized === "completed" || normalized === "done") {
+    return "Done";
+  }
+
+  if (normalized === "doing" || normalized === "in progress") {
+    return "In Progress";
+  }
+
+  if (normalized === "at risk") {
     return "At Risk";
   }
 
@@ -375,7 +382,8 @@ function scheduleWorkItems(workItems, preparedInitiatives, timeline) {
     const beyondInitiative = horizonDate.getTime() > initiativeEnd;
     const beyondHorizon = endIndex > maxIndex;
     const circularDependency = unresolvedIds.has(item.id);
-    const atRisk = beyondInitiative || beyondHorizon || circularDependency;
+    const blocked = String(item.status || "").trim().toLowerCase() === "blocked";
+    const atRisk = beyondInitiative || beyondHorizon || circularDependency || blocked;
     const scheduledItem = {
       ...item,
       initiative,
@@ -388,6 +396,7 @@ function scheduleWorkItems(workItems, preparedInitiatives, timeline) {
         .map((dependencyId) => itemMap.get(dependencyId)?.name)
         .filter(Boolean),
       atRisk,
+      blocked,
       circularDependency,
       status: clampStatus(item.status, atRisk),
     };
@@ -439,8 +448,8 @@ function buildDependencyMap(scheduledItems) {
 
           return {
             id: `${dependencyId}-${item.id}`,
-            from: dependency.name,
-            to: item.name,
+            from: `${dependency.itemNumber || "?"}. ${dependency.name}`,
+            to: `${item.itemNumber || "?"}. ${item.name}`,
             note: crossInitiative
               ? `${dependency.initiative.name} -> ${item.initiative.name}`
               : `${dependency.name} completes before ${item.name} can advance.`,
@@ -451,7 +460,7 @@ function buildDependencyMap(scheduledItems) {
       return (item.dependencyRefs || []).map((reference, index) => ({
         id: `raw-${item.id}-${index}`,
         from: reference,
-        to: item.name,
+        to: `${item.itemNumber || "?"}. ${item.name}`,
         note: `${reference} is a prerequisite for ${item.name}.`,
       }));
     })
@@ -466,29 +475,153 @@ function buildExecutiveSummaries(preparedInitiatives, scheduledItems, preparedMi
     const milestones = preparedMilestones.filter(
       (milestone) => milestone.initiative?.id === initiative.id,
     );
+    const initiativeProgress = calculateInitiativeProgress(items);
     const risks = items.filter((item) => item.atRisk);
+    const blockedItems = items.filter((item) => item.status === "Blocked");
     const nowItem = items[0];
     const nextItem = items[1];
-    const laterItem = items[items.length - 1];
+    const completedCount = items.filter((item) => item.status === "Done").length;
+    const milestoneHighlights = milestones.slice(0, 2);
 
     return {
       id: initiative.id,
       title: initiative.name,
       theme: initiative.theme,
       bullets: [
-        `Drive ${initiative.theme.toLowerCase() || "delivery"} outcomes across ${initiative.quarterRange}.`,
+        items.length > 0
+          ? `${initiativeProgress}% complete across ${items.length} items, with ${completedCount} delivered.`
+          : "No work items imported yet.",
         nowItem
-          ? `Now: ${nowItem.name}.${nextItem ? ` Next: ${nextItem.name}.` : ""}${laterItem && laterItem !== nowItem ? ` Later: ${laterItem.name}.` : ""}`
-          : "Add work items to generate a now/next/later sequence.",
-        risks.length > 0
-          ? `Watchpoint: ${risks[0].name} is under schedule pressure because of dependencies or timeline spillover.`
-          : `Dependencies are currently sequenced cleanly for this initiative.`,
-        milestones.length > 0
-          ? `Milestones: ${milestones.map((milestone) => `${milestone.quarter} - ${milestone.label}`).join(" | ")}`
-          : "No milestones imported yet.",
+          ? `Current focus: ${nowItem.name}.${nextItem ? ` Next up: ${nextItem.name}.` : ""}`
+          : "Add work items to generate the current focus.",
+        blockedItems.length > 0
+          ? `Blocked: ${blockedItems[0].name}${blockedItems[0].blockers ? ` (${blockedItems[0].blockers})` : ""}.`
+          : risks.length > 0
+            ? `Watchpoint: ${risks[0].name} needs attention due to timeline or dependency pressure.`
+            : "No active blockers. Execution is sequenced cleanly.",
+        milestoneHighlights.length > 0
+          ? `Milestones: ${milestoneHighlights
+              .map((milestone) => `${milestone.quarter} - ${milestone.label}`)
+              .join(" | ")}`
+          : "No milestones recorded yet.",
       ],
     };
   });
+}
+
+function getTrackingKey(item) {
+  const externalId = String(item?.externalId || "").trim();
+
+  if (externalId) {
+    return `id:${externalId.toLowerCase()}`;
+  }
+
+  const initiativeName = String(item?.initiativeName || "").trim().toLowerCase();
+  const itemName = String(item?.name || "").trim().toLowerCase();
+
+  return `${initiativeName}::${itemName}`;
+}
+
+function compareImportStates(previousItems, nextItems) {
+  const previousList = Array.isArray(previousItems) ? previousItems : [];
+  const nextList = Array.isArray(nextItems) ? nextItems : [];
+  const previousMap = new Map(previousList.map((item) => [getTrackingKey(item), item]));
+  const nextMap = new Map(nextList.map((item) => [getTrackingKey(item), item]));
+  const added = [];
+  const removed = [];
+  const updated = [];
+  let statusChanges = 0;
+  let progressChanges = 0;
+
+  nextMap.forEach((item, key) => {
+    if (!previousMap.has(key)) {
+      added.push(item);
+      return;
+    }
+
+    const previousItem = previousMap.get(key);
+    const changedFields = [];
+
+    [
+      ["name", previousItem.name, item.name],
+      ["initiative", previousItem.initiativeName, item.initiativeName],
+      ["status", previousItem.status, item.status],
+      ["progress", previousItem.progress, item.progress],
+      ["startDate", previousItem.startDate, item.startDate],
+      ["endDate", previousItem.endDate, item.endDate],
+      ["blockers", previousItem.blockers, item.blockers],
+      ["notes", previousItem.notes, item.notes],
+    ].forEach(([field, left, right]) => {
+      if (String(left || "").trim() !== String(right || "").trim()) {
+        changedFields.push(field);
+      }
+    });
+
+    if (changedFields.length > 0) {
+      if (changedFields.includes("status")) {
+        statusChanges += 1;
+      }
+
+      if (changedFields.includes("progress")) {
+        progressChanges += 1;
+      }
+
+      updated.push({
+        name: item.name,
+        initiativeName: item.initiativeName,
+        changedFields,
+      });
+    }
+  });
+
+  previousMap.forEach((item, key) => {
+    if (!nextMap.has(key)) {
+      removed.push(item);
+    }
+  });
+
+  if (previousList.length === 0) {
+    return {
+      initialImport: true,
+      addedCount: nextList.length,
+      removedCount: 0,
+      updatedCount: 0,
+      statusChanges: 0,
+      progressChanges: 0,
+      removedItems: [],
+      updatedItems: [],
+    };
+  }
+
+  return {
+    initialImport: false,
+    addedCount: added.length,
+    removedCount: removed.length,
+    updatedCount: updated.length,
+    statusChanges,
+    progressChanges,
+    removedItems: removed.map((item) => ({
+      id: getTrackingKey(item),
+      name: item.name,
+      initiativeName: item.initiativeName,
+    })),
+    updatedItems: updated.slice(0, 4),
+  };
+}
+
+function formatChangedFieldLabel(field) {
+  const labels = {
+    name: "name",
+    initiative: "initiative",
+    status: "status",
+    progress: "progress",
+    startDate: "start date",
+    endDate: "end date",
+    blockers: "blockers",
+    notes: "notes",
+  };
+
+  return labels[field] || field;
 }
 
 function normalizeHeaderKey(value) {
@@ -586,6 +719,9 @@ function buildStateFromWorkbook(workbook, currentState) {
       }
 
       const itemId = `item-import-${sheetIndex + 1}-${rowIndex + 1}`;
+      const externalId = String(
+        getRowValue(row, ["itemid", "workitemid", "trackingid", "id"]),
+      ).trim();
       const startDate = normalizeExcelDate(getRowValue(row, ["startdate"]));
       const endDate = normalizeExcelDate(getRowValue(row, ["enddate"]));
       const durationValue = String(
@@ -593,7 +729,9 @@ function buildStateFromWorkbook(workbook, currentState) {
       ).trim();
       const item = {
         id: itemId,
+        externalId,
         initiativeId: sheetEntry.initiative.id,
+        initiativeName: sheetEntry.initiative.name,
         name: itemName,
         description: String(getRowValue(row, ["description"])).trim(),
         owner: String(getRowValue(row, ["owner", "lead"])).trim(),
@@ -608,7 +746,16 @@ function buildStateFromWorkbook(workbook, currentState) {
           String(getRowValue(row, ["status"])).trim() || "Planned",
         dependencyIds: [],
         dependencyRefs: [],
-        progress: 0,
+        dependencyLinks: [],
+        blockers: String(getRowValue(row, ["blockers"])).trim(),
+        progress: Math.max(
+          0,
+          Math.min(
+            100,
+            Number.parseInt(getRowValue(row, ["progress", "progresspercent"]), 10) || 0,
+          ),
+        ),
+        notes: String(getRowValue(row, ["notes"])).trim(),
       };
       const dependencyText = String(
         getRowValue(row, ["dependencies", "dependency", "dependson"]),
@@ -674,6 +821,19 @@ function buildStateFromWorkbook(workbook, currentState) {
       })
       .filter(Boolean);
     item.dependencyRefs = entry.references;
+    item.dependencyLinks = entry.references.map((reference) => {
+      const [initiativeName, itemName] = reference.includes("::")
+        ? reference.split("::")
+        : [entry.initiativeName, reference];
+      const key = `${String(initiativeName).trim().toLowerCase()}::${String(itemName)
+        .trim()
+        .toLowerCase()}`;
+
+      return {
+        reference,
+        itemId: itemLookup.get(key) || "",
+      };
+    });
   });
 
   return {
@@ -689,6 +849,7 @@ function downloadExcelTemplate() {
   const workbook = XLSX.utils.book_new();
   const initiativeSheet = XLSX.utils.aoa_to_sheet([
     [
+      "Item ID",
       "Initiative",
       "Initiative Narrative Theme",
       "Item Name",
@@ -700,8 +861,12 @@ function downloadExcelTemplate() {
       "Milestone",
       "Milestone Quarter",
       "Dependencies",
+      "Blockers",
+      "Progress %",
+      "Notes",
     ],
     [
+      "Q-001",
       "Initiative 1",
       "Shift from manual QA to scalable, intelligence-driven quality execution",
       "Establish logging & observability foundation",
@@ -713,8 +878,12 @@ function downloadExcelTemplate() {
       "Observability foundation ready",
       "Q1 2026",
       "None",
+      "",
+      "25",
+      "Initial framework definition in progress.",
     ],
     [
+      "Q-002",
       "Initiative 1",
       "Shift from manual QA to scalable, intelligence-driven quality execution",
       "Role-based dashboards integrated into SDLC",
@@ -726,8 +895,12 @@ function downloadExcelTemplate() {
       "",
       "",
       "Establish logging & observability foundation",
+      "",
+      "0",
+      "",
     ],
     [
+      "Q-003",
       "Initiative 1",
       "Shift from manual QA to scalable, intelligence-driven quality execution",
       "AI-assisted anomaly detection and proactive alerting",
@@ -739,10 +912,14 @@ function downloadExcelTemplate() {
       "Anomaly detection pilot",
       "Q3 2026",
       "Initiative 2::Migrate release automation / orchestration",
+      "Awaiting environment access approval",
+      "0",
+      "Track access approval in weekly review.",
     ],
   ]);
 
   initiativeSheet["!cols"] = [
+    { wch: 16 },
     { wch: 22 },
     { wch: 64 },
     { wch: 42 },
@@ -754,6 +931,9 @@ function downloadExcelTemplate() {
     { wch: 30 },
     { wch: 18 },
     { wch: 48 },
+    { wch: 32 },
+    { wch: 14 },
+    { wch: 42 },
   ];
 
   XLSX.utils.book_append_sheet(workbook, initiativeSheet, "Initiative 1");
@@ -776,8 +956,58 @@ function downloadJsonFile(payload, filename) {
 function normalizeWorkItems(items) {
   return items.map((item) => ({
     ...item,
+    externalId: item.externalId || "",
+    initiativeName: item.initiativeName || "",
     progress: typeof item.progress === "number" ? item.progress : 0,
+    blockers: item.blockers || "",
+    notes: item.notes || "",
+    dependencyRefs: Array.isArray(item.dependencyRefs) ? item.dependencyRefs : [],
+    dependencyLinks: Array.isArray(item.dependencyLinks) ? item.dependencyLinks : [],
   }));
+}
+
+function normalizePersistedState(parsed) {
+  return {
+    portfolioName: parsed?.portfolioName || defaultState.portfolioName,
+    teamName: parsed?.teamName || "",
+    audience: parsed?.audience || defaultState.audience,
+    vision: parsed?.vision || defaultState.vision,
+    initiatives: Array.isArray(parsed?.initiatives) ? parsed.initiatives : [],
+    workItems: Array.isArray(parsed?.workItems) ? normalizeWorkItems(parsed.workItems) : [],
+    milestones: Array.isArray(parsed?.milestones) ? parsed.milestones : [],
+    importDiff: parsed?.importDiff || null,
+  };
+}
+
+function getShareableState(state) {
+  return {
+    portfolioName: state.portfolioName,
+    teamName: state.teamName,
+    audience: state.audience,
+    vision: state.vision,
+    initiatives: state.initiatives,
+    workItems: state.workItems,
+    milestones: state.milestones,
+    importDiff: state.importDiff,
+  };
+}
+
+function loadLocalSnapshot() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const stored = window.localStorage.getItem(STORAGE_KEY);
+
+  if (!stored) {
+    return null;
+  }
+
+  try {
+    return normalizePersistedState(JSON.parse(stored));
+  } catch {
+    return null;
+  }
 }
 
 function calculateInitiativeProgress(items) {
@@ -803,38 +1033,16 @@ function getProgressBadgeColor(progress) {
   return "progress-badge-green";
 }
 
+function formatDependencyReference(item) {
+  if (item.dependencyDisplayLabels?.length > 0) {
+    return item.dependencyDisplayLabels.join("; ");
+  }
+
+  return item.dependencyNames.join("; ");
+}
+
 function App() {
-  const [state, setState] = useState(() => {
-    if (typeof window === "undefined") {
-      return defaultState;
-    }
-
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-
-    if (!stored) {
-      return defaultState;
-    }
-
-    try {
-      const parsed = JSON.parse(stored);
-
-      return {
-        ...defaultState,
-        ...parsed,
-        initiatives: Array.isArray(parsed.initiatives)
-          ? parsed.initiatives
-          : defaultState.initiatives,
-        workItems: Array.isArray(parsed.workItems)
-          ? normalizeWorkItems(parsed.workItems)
-          : defaultState.workItems,
-        milestones: Array.isArray(parsed.milestones)
-          ? parsed.milestones
-          : defaultState.milestones,
-      };
-    } catch {
-      return defaultState;
-    }
-  });
+  const [state, setState] = useState(defaultState);
   const [importMessage, setImportMessage] = useState("");
   const [expandedItemId, setExpandedItemId] = useState("");
   const [selectedFileName, setSelectedFileName] = useState("");
@@ -844,10 +1052,112 @@ function App() {
   const [collapsedInitiatives, setCollapsedInitiatives] = useState({});
   const [showDependencies, setShowDependencies] = useState(false);
   const [dependencyPanelOpen, setDependencyPanelOpen] = useState(false);
+  const [showRemovedItems, setShowRemovedItems] = useState(false);
+  const [entryMode, setEntryMode] = useState("");
+  const [sharedUser, setSharedUser] = useState(null);
+  const [authReady, setAuthReady] = useState(() => !isSharedStorageConfigured());
+  const [sharedSnapshotLoaded, setSharedSnapshotLoaded] = useState(false);
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [state]);
+    if (entryMode === "local") {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(getShareableState(state)));
+    }
+  }, [entryMode, state]);
+
+  useEffect(() => {
+    if (!isSharedStorageConfigured()) {
+      return undefined;
+    }
+
+    return subscribeToSharedAuth((user) => {
+      setSharedUser(user);
+      setAuthReady(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (entryMode === "shared" && authReady && !sharedUser) {
+      setEntryMode("");
+      setSharedSnapshotLoaded(false);
+      setState((current) => ({
+        ...current,
+        activePage: "mode",
+      }));
+      setImportMessage(
+        "Google sign-in is required to use shared storage. Sign in again or use local mode.",
+      );
+    }
+  }, [authReady, entryMode, sharedUser]);
+
+  useEffect(() => {
+    if (entryMode !== "shared" || !sharedUser) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function hydrateSharedState() {
+      try {
+        const sharedState = await loadSharedRoadmapState(sharedUser.uid);
+
+        if (cancelled) {
+          return;
+        }
+
+        if (sharedState) {
+          setState((current) => ({
+            ...current,
+            ...normalizePersistedState(sharedState),
+          }));
+          setImportMessage("Shared roadmap snapshot loaded.");
+        } else {
+          setImportMessage(
+            "Shared storage is connected. Import a workbook to create the first shared snapshot.",
+          );
+        }
+        setSharedSnapshotLoaded(true);
+      } catch {
+        if (!cancelled) {
+          setImportMessage(
+            "Shared storage is unavailable right now. Try again or use local mode.",
+          );
+          setSharedSnapshotLoaded(true);
+        }
+      }
+    }
+
+    hydrateSharedState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [entryMode, sharedUser]);
+
+  useEffect(() => {
+    if (entryMode !== "shared" || !sharedUser || !sharedSnapshotLoaded) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function persistSharedState() {
+      try {
+        await saveSharedRoadmapState(sharedUser.uid, getShareableState(state));
+      } catch {
+        if (!cancelled) {
+          setImportMessage(
+            "Shared storage save failed. Sign in with Google to keep shared data, or switch to local mode.",
+          );
+        }
+      }
+    }
+
+    persistSharedState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [entryMode, sharedUser, sharedSnapshotLoaded, state]);
 
   const roadmapModel = useMemo(() => {
     const timeline = deriveTimeline(state);
@@ -862,20 +1172,15 @@ function App() {
       preparedInitiatives,
       timeline,
     );
-    const numberedItems = scheduledItems.map((item) => item);
-    const sortedForNumbering = [...numberedItems].sort((left, right) => {
-      if (left.initiativeId !== right.initiativeId) {
-        return left.initiativeId.localeCompare(right.initiativeId);
-      }
-
-      if (left.startIndex !== right.startIndex) {
-        return left.startIndex - right.startIndex;
-      }
-
-      return left.name.localeCompare(right.name);
+    const initiativeItemCount = new Map();
+    const numberMap = new Map();
+    scheduledItems.forEach((item) => {
+      const nextNumber = (initiativeItemCount.get(item.initiativeId) || 0) + 1;
+      initiativeItemCount.set(item.initiativeId, nextNumber);
+      numberMap.set(item.id, nextNumber);
     });
-    const numberMap = new Map(
-      sortedForNumbering.map((item, index) => [item.id, index + 1]),
+    const scheduledItemMap = new Map(
+      scheduledItems.map((item) => [item.id, item]),
     );
     const numberedScheduledItems = scheduledItems.map((item) => ({
       ...item,
@@ -883,6 +1188,21 @@ function App() {
       dependencyItemNumbers: item.dependencyIds
         .map((dependencyId) => numberMap.get(dependencyId))
         .filter(Boolean),
+      dependencyDisplayLabels:
+        item.dependencyLinks?.length > 0
+          ? item.dependencyLinks.map((dependencyLink) => {
+              if (dependencyLink.itemId) {
+                const dependencyItem = scheduledItemMap.get(dependencyLink.itemId);
+
+                if (dependencyItem) {
+                  return `${numberMap.get(dependencyLink.itemId) || "?"}. ${dependencyItem.name}`;
+                }
+              }
+
+              return dependencyLink.reference;
+            })
+          : item.dependencyNames,
+      completionPercent: typeof item.progress === "number" ? item.progress : 0,
     }));
 
     return {
@@ -916,6 +1236,9 @@ function App() {
   const visibleTimeline = roadmapModel.timeline.slice(
     visibleStartIndex,
     visibleEndIndex + 1,
+  );
+  const expandedItem = roadmapModel.scheduledItems.find(
+    (item) => item.id === expandedItemId,
   );
   const timelineStyle = {
     "--month-count": Math.max(visibleTimeline.length, 1),
@@ -955,11 +1278,90 @@ function App() {
     }
 
     setState((current) => ({
-      ...buildStateFromWorkbook(pendingWorkbook, current),
-      portfolioName: formatRoadmapTitleFromFilename(selectedFileName),
+      ...(() => {
+        const nextState = buildStateFromWorkbook(pendingWorkbook, current);
+
+        return {
+          ...nextState,
+          importDiff: compareImportStates(current.workItems, nextState.workItems),
+        };
+      })(),
       activePage: "roadmap",
     }));
+    setShowRemovedItems(false);
     setImportMessage(`Roadmap generated from ${selectedFileName}.`);
+  }
+
+  async function enterSharedMode() {
+    if (!isSharedStorageConfigured()) {
+      setImportMessage(
+        "Shared mode is not configured yet. Add Firebase web app keys, then try again.",
+      );
+      return;
+    }
+
+    try {
+      if (!sharedUser) {
+        await signInToSharedMode();
+      }
+
+      setSharedSnapshotLoaded(false);
+      setEntryMode("shared");
+      setState((current) => ({ ...current, activePage: "input" }));
+      setImportMessage("Shared mode enabled.");
+    } catch {
+      setImportMessage(
+        "Google sign-in is required to save shared data. Try again or choose local mode.",
+      );
+    }
+  }
+
+  function enterLocalMode() {
+    const localSnapshot = loadLocalSnapshot();
+
+    setEntryMode("local");
+    setSharedSnapshotLoaded(false);
+    setState((current) => ({
+      ...current,
+      ...(localSnapshot || normalizePersistedState(defaultState)),
+      activePage: "input",
+    }));
+    setImportMessage(
+      localSnapshot
+        ? "Local browser snapshot loaded."
+        : "Local mode enabled. Import a workbook to create the first browser snapshot.",
+    );
+  }
+
+  async function returnToHome() {
+    if (entryMode === "shared" && sharedUser) {
+      try {
+        await signOutFromSharedMode();
+      } catch {
+        // Keep the UI resilient; the mode reset still returns the user home.
+      }
+    }
+
+    setEntryMode("");
+    setSharedSnapshotLoaded(false);
+    setExpandedItemId("");
+    setPendingWorkbook(null);
+    setSelectedFileName("");
+    setShowRemovedItems(false);
+    setState((current) => ({
+      ...current,
+      activePage: "landing",
+    }));
+    setImportMessage("");
+  }
+
+  function updateWorkItem(itemId, field, value) {
+    setState((current) => ({
+      ...current,
+      workItems: current.workItems.map((item) =>
+        item.id === itemId ? { ...item, [field]: value } : item,
+      ),
+    }));
   }
 
   function handleVisibleStartChange(event) {
@@ -1002,33 +1404,118 @@ function App() {
     );
   }
 
+  if (state.activePage === "landing") {
+    return (
+      <div className="app-shell">
+        <main className="landing-shell">
+          <section className="hero-copy landing-panel">
+            <p className="eyebrow">Roadmap Generator</p>
+            <h1>Roadmap Generator</h1>
+            <p className="lede">
+              Build a leadership-ready delivery roadmap from a single Excel workbook,
+              preserve snapshot history, and review changes over time.
+            </p>
+            <button
+              type="button"
+              className="primary-button landing-action"
+              onClick={() =>
+                setState((current) => ({ ...current, activePage: "mode" }))
+              }
+            >
+              Enter Roadmap Generator
+            </button>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (state.activePage === "mode") {
+    return (
+      <div className="app-shell">
+        <main className="landing-shell">
+          <section className="panel mode-panel">
+            <div>
+              <p className="eyebrow">Entry Mode</p>
+              <h2>Choose how you want to work</h2>
+              <p className="subtle-copy">
+                Use Google sign-in for shared snapshots across browsers and
+                machines, or choose local mode to keep everything in the current browser.
+              </p>
+            </div>
+
+            <div className="mode-card-grid">
+              <article className="mode-card">
+                <p className="signal-label">Shared Mode</p>
+                <strong>Google Sign-In</strong>
+                <p className="subtle-copy">
+                  Saves the roadmap snapshot to Firestore so the same data is
+                  available across devices.
+                </p>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={enterSharedMode}
+                  disabled={!authReady}
+                >
+                  {sharedUser ? "Continue In Shared Mode" : "Sign In With Google"}
+                </button>
+              </article>
+
+              <article className="mode-card">
+                <p className="signal-label">Browser Mode</p>
+                <strong>Local Mode Storage</strong>
+                <p className="subtle-copy">
+                  Keeps imports and snapshot history in this browser only. No sign-in required.
+                </p>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={enterLocalMode}
+                >
+                  Continue In Local Mode
+                </button>
+              </article>
+            </div>
+
+            {importMessage ? <p className="subtle-copy">{importMessage}</p> : null}
+          </section>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <header className="hero-band">
         <div className="hero-copy">
           <p className="eyebrow">Delivery Roadmap Creator</p>
           <p className="lede">
-            Add initiatives, work items, milestones, and dependencies through
-            structured fields, then switch into a wide roadmap view built for
-            leadership communication.
+            Upload an Excel workbook and generate a compact delivery roadmap
+            that is ready to review or paste into leadership slides.
           </p>
         </div>
       </header>
 
-      <div className="page-switcher">
-        <button
-          type="button"
-          className={state.activePage === "input" ? "tab-button active" : "tab-button"}
-          onClick={() => setState((current) => ({ ...current, activePage: "input" }))}
-        >
-          Input Page
-        </button>
-        <button
-          type="button"
-          className={state.activePage === "roadmap" ? "tab-button active" : "tab-button"}
-          onClick={() => setState((current) => ({ ...current, activePage: "roadmap" }))}
-        >
-          Delivery Roadmap
+      <div className="workspace-topbar">
+        <div className="page-switcher">
+          <button
+            type="button"
+            className={state.activePage === "input" ? "tab-button active" : "tab-button"}
+            onClick={() => setState((current) => ({ ...current, activePage: "input" }))}
+          >
+            Input Page
+          </button>
+          <button
+            type="button"
+            className={state.activePage === "roadmap" ? "tab-button active" : "tab-button"}
+            onClick={() => setState((current) => ({ ...current, activePage: "roadmap" }))}
+          >
+            Delivery Roadmap
+          </button>
+        </div>
+        <button type="button" className="ghost-button" onClick={returnToHome}>
+          Entry Mode
         </button>
       </div>
 
@@ -1051,10 +1538,17 @@ function App() {
 
             <p className="subtle-copy">
               Use one sheet per initiative. Only sheets whose names start with
-              `Initiative` are imported. Expected columns: `Initiative`,
-              `Initiative Narrative Theme`, `Item Name`, `Description`,
+              `Initiative` are imported. Expected columns: `Item ID`,
+              `Initiative`, `Initiative Narrative Theme`, `Item Name`, `Description`,
               `Start Date`, `End Date`, `Owner`, `Status`, `Milestone`,
-              `Milestone Quarter`, `Dependencies`.
+              `Milestone Quarter`, `Dependencies`, `Blockers`, `Progress %`,
+              `Notes`.
+            </p>
+
+            <p className="subtle-copy">
+              {isSharedStorageConfigured()
+                ? "Shared snapshot storage is enabled through Firestore."
+                : "Shared snapshot storage is not configured yet. The browser snapshot will be used until Firebase web app keys are added."}
             </p>
 
             <label>
@@ -1065,7 +1559,7 @@ function App() {
                 onChange={(event) =>
                   setState((current) => ({ ...current, teamName: event.target.value }))
                 }
-                placeholder="Systems Team"
+                placeholder="Enter team name"
               />
             </label>
 
@@ -1096,15 +1590,7 @@ function App() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Delivery Roadmap</p>
-                <h2>
-                  {[
-                    state.portfolioName || "",
-                    state.teamName || "",
-                    "Delivery Roadmap",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                </h2>
+                <h2>{state.teamName ? `${state.teamName} Delivery Roadmap` : "Delivery Roadmap"}</h2>
                 <p className="subtle-copy">
                   {state.audience}
                 </p>
@@ -1153,6 +1639,56 @@ function App() {
               </div>
             </div>
 
+            {state.importDiff ? (
+              <div className="import-diff-panel">
+                <div className="import-diff-header">
+                  <div>
+                    <p className="signal-label">Import Changes</p>
+                    <strong>
+                      {state.importDiff.initialImport
+                        ? `Initial import loaded ${state.importDiff.addedCount} items`
+                        : `${state.importDiff.addedCount} added • ${state.importDiff.removedCount} removed • ${state.importDiff.updatedCount} updated`}
+                    </strong>
+                  </div>
+                  {state.importDiff.removedCount > 0 ? (
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => setShowRemovedItems((current) => !current)}
+                    >
+                      {showRemovedItems ? "Hide Removed" : "Show Removed"}
+                    </button>
+                  ) : null}
+                </div>
+                {!state.importDiff.initialImport ? (
+                  <p className="subtle-copy import-diff-meta">
+                    Status changes: {state.importDiff.statusChanges} • Progress updates:{" "}
+                    {state.importDiff.progressChanges}
+                  </p>
+                ) : null}
+                {state.importDiff.updatedItems?.length > 0 ? (
+                  <div className="import-change-list">
+                    {state.importDiff.updatedItems.map((item) => (
+                      <div className="import-change-pill" key={`${item.initiativeName}-${item.name}`}>
+                        <strong>{item.name}</strong>
+                        <span>{item.changedFields.map(formatChangedFieldLabel).join(", ")}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {showRemovedItems && state.importDiff.removedItems?.length > 0 ? (
+                  <div className="removed-items-list">
+                    {state.importDiff.removedItems.map((item) => (
+                      <div className="removed-item" key={item.id}>
+                        <strong>{item.name}</strong>
+                        <span>{item.initiativeName}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="range-panel">
               <div>
                 <p className="signal-label">Visible Range</p>
@@ -1190,12 +1726,23 @@ function App() {
                 <div className="timeline-header">
                   <div className="lane-label sticky-column">Initiative / Item</div>
                   <div className="month-grid">
-                    {visibleTimeline.map((month) => (
-                      <div key={month.label} className="month-cell">
+                    {visibleTimeline.map((month, monthOffset) => {
+                      const absoluteMonthIndex = visibleStartIndex + monthOffset;
+                      const isHighlighted =
+                        expandedItem &&
+                        absoluteMonthIndex >= expandedItem.startIndex &&
+                        absoluteMonthIndex <= expandedItem.displayEndIndex;
+
+                      return (
+                      <div
+                        key={month.label}
+                        className={isHighlighted ? "month-cell highlighted" : "month-cell"}
+                      >
                         <span>{month.shortLabel}</span>
                         <small>{month.quarter}</small>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -1223,10 +1770,20 @@ function App() {
                         className="initiative-toggle"
                         onClick={() => toggleInitiative(initiative.id)}
                       >
-                        <div className="sticky-column initiative-label">
-                          <p>{initiative.name || "Untitled initiative"}</p>
-                          <span className={`initiative-progress ${getProgressBadgeColor(calculateInitiativeProgress(items))}`}>
-                            {calculateInitiativeProgress(items)}% avg progress
+                        <div className="sticky-column initiative-toggle-main">
+                          <div className="initiative-label">
+                            <p>{initiative.name || "Untitled initiative"}</p>
+                            <span className={`initiative-progress ${getProgressBadgeColor(calculateInitiativeProgress(items))}`}>
+                              {calculateInitiativeProgress(items)}% avg progress
+                            </span>
+                          </div>
+                          {!isCollapsed && initiative.narrative ? (
+                            <span className="initiative-inline-narrative">
+                              {initiative.narrative}
+                            </span>
+                          ) : null}
+                          <span className="initiative-count">
+                            {items.length} item{items.length === 1 ? "" : "s"} • {completedCount} done
                           </span>
                         </div>
                         <span className={`chevron ${isCollapsed ? "" : "open"}`}>
@@ -1262,6 +1819,8 @@ function App() {
                                   <div className="month-grid track-grid">
                                     <div
                                       className={`timeline-span ${item.atRisk ? "risk" : ""} ${
+                                        item.status === "Blocked" ? "blocked" : ""
+                                      } ${
                                         item.status === "Done" ? "done" : ""
                                       } ${item.status === "In Progress" ? "progress" : ""}`}
                                       style={{
@@ -1300,7 +1859,7 @@ function App() {
                                         </div>
                                       </div>
                                     </div>
-                                    {showDependencies && item.dependencyNames.length > 0 ? (
+                                    {showDependencies && formatDependencyReference(item) ? (
                                       <div
                                         className="dependency-inline"
                                         style={{
@@ -1314,10 +1873,7 @@ function App() {
                                       >
                                         <span className="dependency-inline-line" />
                                         <span className="dependency-inline-pill">
-                                          Depends on{" "}
-                                          {item.dependencyItemNumbers.length > 0
-                                            ? item.dependencyItemNumbers.join(", ")
-                                            : item.dependencyNames.length}
+                                          {`Depends on ${formatDependencyReference(item) || "dependency"}`}
                                         </span>
                                       </div>
                                     ) : null}
@@ -1327,45 +1883,78 @@ function App() {
 
                               {isExpanded ? (
                                 <div className="item-detail-panel">
-                                  <span>{item.owner || "Owner pending"}</span>
-                                  <span>{item.status}</span>
-                                  <span>
-                                    {roadmapModel.timeline[item.startIndex]?.label || "Start pending"} to{" "}
-                                    {roadmapModel.timeline[item.displayEndIndex]?.label || "End pending"}
-                                  </span>
-                                  <span>
-                                    {item.dependencyNames.length > 0
-                                      ? `Depends on: ${
-                                          item.dependencyItemNumbers.length > 0
-                                            ? item.dependencyItemNumbers.join(", ")
-                                            : item.dependencyNames.join(", ")
-                                        }`
-                                      : "No blockers"}
-                                  </span>
-                                  <div className="progress-control-wrapper">
-                                    <label>
-                                      Progress: {item.progress || 0}%
-                                      <input
-                                        type="range"
-                                        min="0"
-                                        max="100"
-                                        value={item.progress || 0}
-                                        onChange={(event) =>
-                                          updateWorkItem(item.id, "progress", Number.parseInt(event.target.value, 10))
-                                        }
-                                        className="progress-slider"
-                                      />
-                                    </label>
+                                  <div className="detail-grid">
+                                    <div className="detail-row">
+                                      <span className="detail-label">Owner:</span>
+                                      <span className="detail-value">{item.owner || "Owner pending"}</span>
+                                    </div>
+                                    <div className="detail-row">
+                                      <span className="detail-label">Status:</span>
+                                      <span className="detail-value">{item.status}</span>
+                                    </div>
+                                    <div className="detail-row">
+                                      <span className="detail-label">Timeline:</span>
+                                      <span className="detail-value">
+                                        {roadmapModel.timeline[item.startIndex]?.label || "Start pending"} to{" "}
+                                        {roadmapModel.timeline[item.displayEndIndex]?.label || "End pending"}
+                                      </span>
+                                    </div>
+                                    <div className="detail-row">
+                                      <span className="detail-label">Blockers:</span>
+                                      <span className="detail-value">
+                                        {item.blockers ? item.blockers : "No blockers"}
+                                      </span>
+                                    </div>
+                                    <div className="detail-row dependency-detail-row">
+                                      <span className="detail-label">Dependencies:</span>
+                                      <span className="detail-value">
+                                        {formatDependencyReference(item)
+                                          ? `Depends on ${formatDependencyReference(item)}`
+                                          : "No dependencies"}
+                                      </span>
+                                    </div>
+                                    <div className="detail-row progress-row">
+                                      <span className="detail-label">Progress:</span>
+                                      <div className="detail-progress-block">
+                                        <span className="detail-value">{item.progress || 0}%</span>
+                                        <div className="progress-bar detail-progress-bar">
+                                          <div
+                                            className="progress-bar-fill"
+                                            style={{ width: `${item.progress || 0}%` }}
+                                          />
+                                        </div>
+                                      </div>
+                                    </div>
                                   </div>
                                   {roadmapModel.preparedMilestones
                                     .filter((milestone) => milestone.itemId === item.id)
                                     .map((milestone) => (
-                                      <span key={milestone.id} className="milestone-pill">
-                                        Milestone: {milestone.label} ({milestone.quarter})
-                                      </span>
+                                      <div className="milestone-callout" key={milestone.id}>
+                                        <span
+                                          className="milestone-callout-icon"
+                                          aria-hidden="true"
+                                        />
+                                        <div className="milestone-callout-copy">
+                                          <span className="milestone-callout-label">
+                                            Milestone
+                                          </span>
+                                          <strong>
+                                            {milestone.label} ({milestone.quarter})
+                                          </strong>
+                                        </div>
+                                      </div>
                                     ))}
+                                  {item.notes ? (
+                                    <div className="detail-row notes-row">
+                                      <span className="detail-label">Notes:</span>
+                                      <span className="detail-value">{item.notes}</span>
+                                    </div>
+                                  ) : null}
                                   {item.description ? (
-                                    <p className="detail-description">{item.description}</p>
+                                    <div className="detail-row notes-row description-row">
+                                      <span className="detail-label">Description:</span>
+                                      <span className="detail-value">{item.description}</span>
+                                    </div>
                                   ) : null}
                                 </div>
                               ) : null}

@@ -4,7 +4,10 @@
   "description": "A lightweight roadmap generator starter project.",
   "private": true,
   "scripts": {
-    "dev": "concurrently \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\""
+    "dev": "concurrently \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
+    "build:frontend": "npm --prefix frontend run build",
+    "build": "npm run build:frontend",
+    "deploy:hosting": "npm run build:frontend && npx firebase-tools deploy --only hosting"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
